@@ -30,10 +30,6 @@ impl Lexer {
             let tok = self.next_token()?;
             self.tokens.push(tok);
         }
-        self.tokens.push(TokenWithSpan {
-            token: Token::Keyword(Keyword::True), // placeholder for EOF
-            span: Span::dummy(),
-        });
         Ok(std::mem::take(&mut self.tokens))
     }
 
