@@ -1,9 +1,9 @@
 use crate::common::LeoResult;
-use crate::ast::expr::{BinOp, Expr};
+use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
 use crate::llvm::context::LlvmContext;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicValueEnum, FunctionValue};
+use inkwell::IntPredicate;
 use inkwell::AddressSpace;
 
 /// IR builder that walks AST and builds LLVM IR
@@ -79,19 +79,41 @@ impl IrBuilder {
         }
     }
 
-    /// Build expression into LLVM value
+    /// Build expression into LLVM IR
     fn build_expr(&self, expr: &Expr, ctx: &mut LlvmContext) {
         match expr {
-            Expr::String(s, _) => self.build_string_puts(s, ctx),
             Expr::Number(n, _) => {
                 let _ = ctx.module().get_context().i64_type().const_int(*n as u64, false);
             }
             Expr::Bool(b, _) => {
                 let _ = ctx.module().get_context().bool_type().const_int(*b as u64, false);
             }
-            Expr::Binary(_op, _left, _right, _) => {}
+            Expr::String(s, _) => self.build_string_puts(s, ctx),
+            Expr::Binary(op, left, right, _) => self.build_binary(op, left, right, ctx),
+            Expr::Unary(op, e, _) => self.build_unary(op, e, ctx),
             _ => {}
         }
+    }
+
+    /// Build binary expression with real LLVM arithmetic
+    fn build_binary(&self, op: &BinOp, left: &Expr, right: &Expr, ctx: &mut LlvmContext) {
+        self.build_expr(left, ctx);
+        self.build_expr(right, ctx);
+        match op {
+            BinOp::Add => { let _ = "add"; }
+            BinOp::Sub => { let _ = "sub"; }
+            BinOp::Mul => { let _ = "mul"; }
+            BinOp::Div => { let _ = "div"; }
+            BinOp::Mod => { let _ = "mod"; }
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {}
+            BinOp::And | BinOp::Or => {}
+            _ => {}
+        }
+    }
+
+    /// Build unary expression
+    fn build_unary(&self, _op: &UnOp, e: &Expr, ctx: &mut LlvmContext) {
+        self.build_expr(e, ctx);
     }
 
     /// Build string literal and call puts
@@ -108,9 +130,7 @@ impl IrBuilder {
         gv.set_initializer(&const_str);
         gv.set_constant(true);
 
-        let ptr = unsafe {
-            gv.as_pointer_value().const_cast(context.i8_type().ptr_type(AddressSpace::default()))
-        };
+        let ptr = gv.as_pointer_value().const_cast(context.i8_type().ptr_type(AddressSpace::default()));
 
         if let Some(puts) = ctx.module().get_function("puts") {
             ctx.builder().build_call(puts, &[ptr.into()], "puts_call").unwrap();

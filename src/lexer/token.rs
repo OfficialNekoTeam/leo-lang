@@ -44,6 +44,8 @@ pub enum Keyword {
     Self_,
     True,
     False,
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -151,6 +151,19 @@ impl Parser {
                 self.advance();
                 Ok(Stmt::Pub(Box::new(self.parse_stmt()?)))
             }
+            Token::Keyword(Keyword::Break) => {
+                let span = self.cur_span();
+                self.advance();
+                let expr = if self.is_expr_start() { Some(self.parse_expr()?) } else { None };
+                self.skip_semi();
+                Ok(Stmt::Break(expr, span))
+            }
+            Token::Keyword(Keyword::Continue) => {
+                let span = self.cur_span();
+                self.advance();
+                self.skip_semi();
+                Ok(Stmt::Continue(span))
+            }
             _ => { let e = self.parse_expr()?; self.skip_semi(); Ok(Stmt::Expr(e)) }
         }
     }

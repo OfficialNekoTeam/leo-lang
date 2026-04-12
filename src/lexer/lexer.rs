@@ -289,6 +289,8 @@ impl Lexer {
             "self" => Some(Keyword::Self_),
             "true" => Some(Keyword::True),
             "false" => Some(Keyword::False),
+            "break" => Some(Keyword::Break),
+            "continue" => Some(Keyword::Continue),
             _ => None,
         }
     }
