@@ -1,7 +1,63 @@
-pub struct LlvmContext;
+use inkwell::context::Context;
+use inkwell::module::Module;
+use inkwell::builder::Builder;
+use inkwell::values::FunctionValue;
+use std::collections::HashMap;
 
-impl LlvmContext {
-    pub fn new() -> Self {
-        Self
+/// Wrapper around LLVM module and builder (Context owned externally)
+pub struct LlvmContext<'ctx> {
+    module: Module<'ctx>,
+    builder: Builder<'ctx>,
+    functions: HashMap<String, FunctionValue<'ctx>>,
+}
+
+impl<'ctx> LlvmContext<'ctx> {
+    /// Create new LLVM context with empty module
+    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
+        let module = context.create_module(module_name);
+        let builder = context.create_builder();
+        Self { module, builder, functions: HashMap::new() }
+    }
+
+    /// Get reference to module
+    pub fn module(&self) -> &Module<'ctx> { &self.module }
+
+    /// Get reference to builder
+    pub fn builder(&self) -> &Builder<'ctx> { &self.builder }
+
+    /// Register a function value by name
+    pub fn register_function(&mut self, name: String, fv: FunctionValue<'ctx>) {
+        self.functions.insert(name, fv);
+    }
+
+    /// Look up function by name
+    pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
+        self.functions.get(name).copied()
+    }
+
+    /// Write bitcode to file
+    pub fn write_bitcode(&self, path: &str) -> Result<(), String> {
+        self.module.write_bitcode_to_path(path.as_ref())
+            .then_some(())
+            .ok_or_else(|| format!("failed to write bitcode to {}", path))
+    }
+
+    /// Print module IR to string
+    pub fn print_module(&self) -> String {
+        self.module.print_to_string().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inkwell::context::Context;
+
+    #[test]
+    fn test_llvm_context_new() {
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test");
+        let ir = ctx.print_module();
+        assert!(ir.contains("test"));
     }
 }
