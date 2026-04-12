@@ -1,4 +1,4 @@
-use crate::common::LeoResult;
+use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
 use crate::llvm::context::LlvmContext;
@@ -6,7 +6,7 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::IntPredicate;
 use inkwell::AddressSpace;
 
-/// IR builder that walks AST and builds LLVM IR
+/// IR builder that walks AST and emits LLVM IR
 pub struct IrBuilder;
 
 impl IrBuilder {
@@ -14,21 +14,22 @@ impl IrBuilder {
 
     /// Build LLVM IR from statements
     pub fn build(&self, stmts: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
-        self.declare_puts(ctx);
+        self.declare_c_runtime(ctx);
         for stmt in stmts {
             self.build_stmt(stmt, ctx)?;
         }
         Ok(())
     }
 
-    /// Declare external puts function for string output
-    fn declare_puts(&self, ctx: &mut LlvmContext) {
+    /// Declare external C runtime functions
+    fn declare_c_runtime(&self, ctx: &mut LlvmContext) {
         let i8_ptr = ctx.module().get_context().i8_type().ptr_type(AddressSpace::default());
-        let fn_type = i8_ptr.fn_type(&[], false);
-        ctx.module().add_function("puts", fn_type, None);
+        let i64_type = ctx.module().get_context().i64_type();
+        ctx.module().add_function("puts", i8_ptr.fn_type(&[], false), None);
+        ctx.module().add_function("printf", ctx.module().get_context().i32_type().fn_type(&[i8_ptr.into(), i64_type.into()], true), None);
     }
 
-    /// Build IR for a single statement
+    /// Build top-level statement
     fn build_stmt(&self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
         match stmt {
             Stmt::Function(name, params, ret, body, _) |
@@ -44,7 +45,7 @@ impl IrBuilder {
         Ok(())
     }
 
-    /// Build LLVM function from AST with body
+    /// Build LLVM function with body
     fn build_fn(&self, name: &str, _params: &[(String, String)], _ret: &Option<String>, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let is_main = name == "main";
@@ -56,85 +57,134 @@ impl IrBuilder {
         ctx.register_function(name.to_string(), function);
 
         for stmt in body {
-            self.build_body_stmt(stmt, ctx);
+            self.build_body_stmt(stmt, ctx)?;
         }
 
         if is_main {
             let zero = context.i32_type().const_int(0, false);
-            ctx.builder().build_return(Some(&zero)).unwrap();
+            ctx.builder().build_return(Some(&zero))
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
         } else {
             let zero = context.i64_type().const_int(0, false);
-            ctx.builder().build_return(Some(&zero)).unwrap();
+            ctx.builder().build_return(Some(&zero))
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
         }
         Ok(())
     }
 
     /// Build statement inside function body
-    fn build_body_stmt(&self, stmt: &Stmt, ctx: &mut LlvmContext) {
+    fn build_body_stmt(&self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
         match stmt {
-            Stmt::Expr(expr) => { self.build_expr(expr, ctx); }
-            Stmt::Let(_, _, Some(init)) => { self.build_expr(init, ctx); }
-            Stmt::Return(Some(expr), _) => { self.build_expr(expr, ctx); }
+            Stmt::Expr(expr) => { let _ = self.eval_and_emit(expr, ctx)?; }
+            Stmt::Let(_name, _ty, Some(init)) => { let _ = self.eval_and_emit(init, ctx)?; }
+            Stmt::Return(Some(expr), _) => { let _ = self.eval_and_emit(expr, ctx)?; }
             _ => {}
         }
+        Ok(())
     }
 
-    /// Build expression into LLVM IR
-    fn build_expr(&self, expr: &Expr, ctx: &mut LlvmContext) {
+    /// Evaluate expression and emit output code (print)
+    fn eval_and_emit(&self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
         match expr {
-            Expr::Number(n, _) => {
-                let _ = ctx.module().get_context().i64_type().const_int(*n as u64, false);
+            Expr::String(s, _) => self.emit_puts(s, ctx),
+            Expr::Number(_, _) | Expr::Bool(_, _) | Expr::Binary(_, _, _, _) | Expr::Unary(_, _, _) => {
+                let val = self.eval_int(expr, ctx)?;
+                self.emit_print_int(val, ctx);
+                Ok(())
             }
-            Expr::Bool(b, _) => {
-                let _ = ctx.module().get_context().bool_type().const_int(*b as u64, false);
-            }
-            Expr::String(s, _) => self.build_string_puts(s, ctx),
-            Expr::Binary(op, left, right, _) => self.build_binary(op, left, right, ctx),
-            Expr::Unary(op, e, _) => self.build_unary(op, e, ctx),
-            _ => {}
+            _ => Ok(()),
         }
     }
 
-    /// Build binary expression with real LLVM arithmetic
-    fn build_binary(&self, op: &BinOp, left: &Expr, right: &Expr, ctx: &mut LlvmContext) {
-        self.build_expr(left, ctx);
-        self.build_expr(right, ctx);
+    /// Evaluate integer expression
+    fn eval_int<'a>(&self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        match expr {
+            Expr::Number(n, _) => Ok(ctx.module().get_context().i64_type().const_int(*n as u64, false)),
+            Expr::Bool(b, _) => Ok(ctx.module().get_context().i64_type().const_int(*b as u64, false)),
+            Expr::Binary(op, left, right, _) => {
+                let lv = self.eval_int(left, ctx)?;
+                let rv = self.eval_int(right, ctx)?;
+                self.emit_binop(op, lv, rv, ctx)
+            }
+            Expr::Unary(op, e, _) => {
+                let val = self.eval_int(e, ctx)?;
+                self.emit_unop(op, val, ctx)
+            }
+            _ => Ok(ctx.module().get_context().i64_type().const_int(0, false)),
+        }
+    }
+
+    /// Emit binary arithmetic/comparison
+    fn emit_binop<'a>(&self, op: &BinOp, lv: inkwell::values::IntValue<'a>, rv: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         match op {
-            BinOp::Add => { let _ = "add"; }
-            BinOp::Sub => { let _ = "sub"; }
-            BinOp::Mul => { let _ = "mul"; }
-            BinOp::Div => { let _ = "div"; }
-            BinOp::Mod => { let _ = "mod"; }
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {}
-            BinOp::And | BinOp::Or => {}
-            _ => {}
-        }
+            BinOp::Add => ctx.builder().build_int_add(lv, rv, "add"),
+            BinOp::Sub => ctx.builder().build_int_sub(lv, rv, "sub"),
+            BinOp::Mul => ctx.builder().build_int_mul(lv, rv, "mul"),
+            BinOp::Div => ctx.builder().build_int_signed_div(lv, rv, "div"),
+            BinOp::Mod => ctx.builder().build_int_signed_rem(lv, rv, "rem"),
+            BinOp::Eq => ctx.builder().build_int_compare(IntPredicate::EQ, lv, rv, "eq"),
+            BinOp::Ne => ctx.builder().build_int_compare(IntPredicate::NE, lv, rv, "ne"),
+            BinOp::Lt => ctx.builder().build_int_compare(IntPredicate::SLT, lv, rv, "lt"),
+            BinOp::Le => ctx.builder().build_int_compare(IntPredicate::SLE, lv, rv, "le"),
+            BinOp::Gt => ctx.builder().build_int_compare(IntPredicate::SGT, lv, rv, "gt"),
+            BinOp::Ge => ctx.builder().build_int_compare(IntPredicate::SGE, lv, rv, "ge"),
+            BinOp::And => ctx.builder().build_and(lv, rv, "and"),
+            BinOp::Or => ctx.builder().build_or(lv, rv, "or"),
+            _ => return Ok(lv),
+        }.map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("{:?} failed", op)))
     }
 
-    /// Build unary expression
-    fn build_unary(&self, _op: &UnOp, e: &Expr, ctx: &mut LlvmContext) {
-        self.build_expr(e, ctx);
+    /// Emit unary operation
+    fn emit_unop<'a>(&self, op: &UnOp, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        match op {
+            UnOp::Neg | UnOp::Minus => {
+                let zero = ctx.module().get_context().i64_type().const_int(0, false);
+                ctx.builder().build_int_sub(zero, val, "neg")
+            }
+            UnOp::Not => {
+                let ones = ctx.module().get_context().i64_type().const_int(u64::MAX, true);
+                ctx.builder().build_xor(val, ones, "not")
+            }
+            _ => return Ok(val),
+        }.map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("{:?} failed", op)))
     }
 
-    /// Build string literal and call puts
-    fn build_string_puts(&self, s: &str, ctx: &mut LlvmContext) {
+    /// Emit printf to print an i64
+    fn emit_print_int<'a>(&self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) {
         let context = ctx.module().get_context();
-        let fmt = format!("{}\0", s);
-        let global_name = format!("__leo_str_{}", s.len());
+        let fmt = format!("%ld\n\0");
         let gv = ctx.module().add_global(
             context.i8_type().array_type(fmt.len() as u32),
             Some(AddressSpace::default()),
-            &global_name,
+            "__leo_fmt_int",
         );
-        let const_str = context.const_string(fmt.as_bytes(), false);
-        gv.set_initializer(&const_str);
+        gv.set_initializer(&context.const_string(fmt.as_bytes(), false));
         gv.set_constant(true);
-
-        let ptr = gv.as_pointer_value().const_cast(context.i8_type().ptr_type(AddressSpace::default()));
-
-        if let Some(puts) = ctx.module().get_function("puts") {
-            ctx.builder().build_call(puts, &[ptr.into()], "puts_call").unwrap();
+        let ptr = gv.as_pointer_value()
+            .const_cast(context.i8_type().ptr_type(AddressSpace::default()));
+        if let Some(printf) = ctx.module().get_function("printf") {
+            ctx.builder().build_call(printf, &[ptr.into(), val.into()], "print_int").ok();
         }
+    }
+
+    /// Emit puts for string
+    fn emit_puts(&self, s: &str, ctx: &mut LlvmContext) -> LeoResult<()> {
+        let context = ctx.module().get_context();
+        let fmt = format!("{}\0", s);
+        let gv = ctx.module().add_global(
+            context.i8_type().array_type(fmt.len() as u32),
+            Some(AddressSpace::default()),
+            &format!("__leo_str_{}", s.len()),
+        );
+        gv.set_initializer(&context.const_string(fmt.as_bytes(), false));
+        gv.set_constant(true);
+        let ptr = gv.as_pointer_value()
+            .const_cast(context.i8_type().ptr_type(AddressSpace::default()));
+        if let Some(puts) = ctx.module().get_function("puts") {
+            ctx.builder().build_call(puts, &[ptr.into()], "puts_call")
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "puts failed".into()))?;
+        }
+        Ok(())
     }
 
     /// Map Leo type string to LLVM type
@@ -160,7 +210,6 @@ mod tests {
         let builder = IrBuilder::new();
         let context = Context::create();
         let mut ctx = LlvmContext::new(&context, "test");
-        let result = builder.build(&[], &mut ctx);
-        assert!(result.is_ok());
+        assert!(builder.build(&[], &mut ctx).is_ok());
     }
 }
