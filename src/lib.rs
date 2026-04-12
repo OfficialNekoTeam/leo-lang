@@ -12,6 +12,7 @@
 //! - `llvm`: LLVM 接口封装
 //! - `compiler`: 编译流程
 
+pub mod cli;
 pub mod common;
 pub mod lexer;
 pub mod parser;
