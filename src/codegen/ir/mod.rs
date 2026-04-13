@@ -22,6 +22,7 @@ mod vec_;
 pub struct IrBuilder {
     pub(super) array_sizes: HashMap<String, u32>,
     pub(super) string_vars: HashSet<String>,
+    pub(super) tmp_counter: u64,
 }
 
 impl IrBuilder {
@@ -29,6 +30,7 @@ impl IrBuilder {
         Self {
             array_sizes: HashMap::new(),
             string_vars: HashSet::new(),
+            tmp_counter: 0,
         }
     }
 

@@ -9,8 +9,16 @@ impl IrBuilder {
                 Ok(())
             }
             Expr::Ident(name, _) => {
-                let val = self.load_ident(name, ctx)?;
-                self.emit_print_int(val, ctx);
+                if self.string_vars.contains(name) {
+                    let ptr = self.eval_string_arg(
+                        &Expr::Ident(name.clone(), crate::common::span::Span::dummy()),
+                        ctx,
+                    )?;
+                    self.emit_print_str_ptr(ptr, ctx)?;
+                } else {
+                    let val = self.load_ident(name, ctx)?;
+                    self.emit_print_int(val, ctx);
+                }
                 Ok(())
             }
             _ => {
@@ -105,6 +113,9 @@ impl IrBuilder {
                     }
                 }
                 if let Some(result) = self.try_string_compare(op, left, right, ctx)? {
+                    return Ok(result);
+                }
+                if let Some(result) = self.try_string_concat(op, left, right, ctx)? {
                     return Ok(result);
                 }
                 let lv = self.eval_int(left, ctx)?;
@@ -381,6 +392,125 @@ impl IrBuilder {
                     ErrorKind::Syntax,
                     ErrorCode::CodegenLLVMError,
                     "zext failed".into(),
+                )
+            })?;
+        Ok(Some(result))
+    }
+
+    /// Try string concat via strcat for Add when at least one operand is a string.
+    /// Allocates a new buffer, copies left then right via strcpy/strcat.
+    fn try_string_concat<'a>(
+        &mut self,
+        op: &BinOp,
+        left: &Expr,
+        right: &Expr,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<Option<inkwell::values::IntValue<'a>>> {
+        if !matches!(op, BinOp::Add) {
+            return Ok(None);
+        }
+        let left_is_str = self.expr_is_string(left);
+        let right_is_str = self.expr_is_string(right);
+        if !left_is_str && !right_is_str {
+            return Ok(None);
+        }
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
+        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "malloc not declared".into(),
+            )
+        })?;
+        let strcpy_fn = ctx.module().get_function("strcpy").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strcpy not declared".into(),
+            )
+        })?;
+        let strcat_fn = ctx.module().get_function("strcat").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strcat not declared".into(),
+            )
+        })?;
+        let left_ptr = self.eval_string_arg(left, ctx)?;
+        let right_ptr = self.eval_string_arg(right, ctx)?;
+        // malloc(4096) for result buffer
+        let buf_size = i64_type.const_int(4096, false);
+        let buf_alloc = ctx
+            .builder()
+            .build_call(malloc_fn, &[buf_size.into()], "concat_buf")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "malloc concat failed".into(),
+                )
+            })?;
+        let buf_ptr = ctx
+            .builder()
+            .build_pointer_cast(
+                buf_alloc
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "malloc void".into(),
+                        )
+                    })?
+                    .into_pointer_value(),
+                i8_ptr_type,
+                "concat_i8",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "cast failed".into(),
+                )
+            })?;
+        // strcpy(buf, left) then strcat(buf, right)
+        ctx.builder()
+            .build_call(
+                strcpy_fn,
+                &[buf_ptr.into(), left_ptr.into()],
+                "strcpy_concat",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strcpy failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_call(
+                strcat_fn,
+                &[buf_ptr.into(), right_ptr.into()],
+                "strcat_concat",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strcat failed".into(),
+                )
+            })?;
+        let result = ctx
+            .builder()
+            .build_ptr_to_int(buf_ptr, i64_type, "concat_result")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
                 )
             })?;
         Ok(Some(result))

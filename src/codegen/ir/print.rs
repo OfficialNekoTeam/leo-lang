@@ -42,6 +42,31 @@ impl IrBuilder {
                     self.emit_print_str(s, ctx)?
                 }
             }
+            Expr::Ident(name, _) if self.string_vars.contains(name) => {
+                let ptr = self.eval_string_arg(expr, ctx)?;
+                if newline {
+                    self.emit_print_str_ptr(ptr, ctx)?;
+                } else {
+                    let context = ctx.module().get_context();
+                    let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
+                    let fmt = "%s\0";
+                    let gv_name = format!("__leo_fmt_str_nn_{}", self.tmp_counter);
+                    self.tmp_counter += 1;
+                    let gv = ctx.module_mut().add_global(
+                        context.i8_type().array_type(fmt.len() as u32),
+                        Some(AddressSpace::default()),
+                        &gv_name,
+                    );
+                    gv.set_initializer(&context.const_string(fmt.as_bytes(), false));
+                    gv.set_constant(true);
+                    let fmt_ptr = gv.as_pointer_value().const_cast(i8_ptr_type);
+                    if let Some(printf) = ctx.module().get_function("printf") {
+                        ctx.builder()
+                            .build_call(printf, &[fmt_ptr.into(), ptr.into()], "print_str_nn")
+                            .ok();
+                    }
+                }
+            }
             _ => {
                 let val = self.eval_int(expr, ctx)?;
                 if newline {
@@ -301,6 +326,39 @@ impl IrBuilder {
                         ErrorKind::Syntax,
                         ErrorCode::CodegenLLVMError,
                         "puts failed".into(),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Emit printf("%s\n", ptr) for a runtime string pointer (i8*)
+    pub(super) fn emit_print_str_ptr<'a>(
+        &mut self,
+        str_ptr: inkwell::values::PointerValue<'a>,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        let context = ctx.module().get_context();
+        let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
+        let fmt_str = "%s\n\0";
+        let name = format!("__leo_fmt_str_ptr_{}", self.tmp_counter);
+        self.tmp_counter += 1;
+        let gv = ctx.module_mut().add_global(
+            context.i8_type().array_type(fmt_str.len() as u32),
+            Some(AddressSpace::default()),
+            &name,
+        );
+        gv.set_initializer(&context.const_string(fmt_str.as_bytes(), false));
+        gv.set_constant(true);
+        let fmt_ptr = gv.as_pointer_value().const_cast(i8_ptr_type);
+        if let Some(printf) = ctx.module().get_function("printf") {
+            ctx.builder()
+                .build_call(printf, &[fmt_ptr.into(), str_ptr.into()], "print_str_ptr")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "printf str failed".into(),
                     )
                 })?;
         }

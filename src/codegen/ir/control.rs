@@ -134,7 +134,12 @@ impl IrBuilder {
     }
 
     /// Build assignment: load value, store into existing variable
-    pub(super) fn build_assign(&mut self, name: &str, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
+    pub(super) fn build_assign(
+        &mut self,
+        name: &str,
+        expr: &Expr,
+        ctx: &mut LlvmContext,
+    ) -> LeoResult<()> {
         let ptr = ctx.get_variable(name).ok_or_else(|| {
             LeoError::new(
                 ErrorKind::Syntax,
@@ -154,7 +159,12 @@ impl IrBuilder {
     }
 
     /// Build while loop: condition block → body block → merge block
-    pub(super) fn build_while(&mut self, cond: &Expr, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
+    pub(super) fn build_while(
+        &mut self,
+        cond: &Expr,
+        body: &[Stmt],
+        ctx: &mut LlvmContext,
+    ) -> LeoResult<()> {
         let function = ctx
             .builder()
             .get_insert_block()
