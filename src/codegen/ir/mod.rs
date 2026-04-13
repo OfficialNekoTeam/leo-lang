@@ -23,6 +23,9 @@ pub struct IrBuilder {
     pub(super) array_sizes: HashMap<String, u32>,
     pub(super) string_vars: HashSet<String>,
     pub(super) tmp_counter: u64,
+    pub(super) struct_fields: HashMap<String, Vec<String>>,
+    pub(super) var_types: HashMap<String, String>,
+    pub(super) methods: HashMap<(String, String), String>,
 }
 
 impl IrBuilder {
@@ -31,6 +34,9 @@ impl IrBuilder {
             array_sizes: HashMap::new(),
             string_vars: HashSet::new(),
             tmp_counter: 0,
+            struct_fields: HashMap::new(),
+            var_types: HashMap::new(),
+            methods: HashMap::new(),
         }
     }
 
@@ -38,6 +44,9 @@ impl IrBuilder {
     pub fn build(&mut self, stmts: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
         self.array_sizes.clear();
         self.string_vars.clear();
+        self.struct_fields.clear();
+        self.var_types.clear();
+        self.methods.clear();
         self.declare_c_runtime(ctx);
         for stmt in stmts {
             self.build_stmt(stmt, ctx)?;

@@ -4,7 +4,7 @@ impl IrBuilder {
     pub(super) fn eval_and_emit(&mut self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
         match expr {
             Expr::String(s, _) => self.emit_puts(s, ctx),
-            Expr::Call(_, _, _) => {
+            Expr::Call(_, _, _) | Expr::Match(_, _, _) => {
                 let _ = self.eval_int(expr, ctx)?;
                 Ok(())
             }
@@ -268,11 +268,55 @@ impl IrBuilder {
                     ".len() only supported on arrays and strings".into(),
                 )),
             },
-            _ => Err(LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                format!("unknown method: .{}", method),
-            )),
+            _ => {
+                if let Expr::Ident(var_name, _) = obj {
+                    if let Some(struct_type) = self.var_types.get(var_name) {
+                        let key = (struct_type.clone(), method.to_string());
+                        if let Some(mangled) = self.methods.get(&key).cloned() {
+                            let func = ctx.get_function(&mangled).ok_or_else(|| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    format!("method function {} not found", mangled),
+                                )
+                            })?;
+                            let obj_val = self.eval_int(obj, ctx)?;
+                            let mut arg_values: Vec<BasicValueEnum> = vec![obj_val.into()];
+                            for arg in _args {
+                                let val = self.eval_int(arg, ctx)?;
+                                arg_values.push(val.into());
+                            }
+                            let call_site = ctx
+                                .builder()
+                                .build_call(
+                                    func,
+                                    &arg_values.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
+                                    "method_call",
+                                )
+                                .map_err(|_| {
+                                    LeoError::new(
+                                        ErrorKind::Syntax,
+                                        ErrorCode::CodegenLLVMError,
+                                        format!("call method {} failed", mangled),
+                                    )
+                                })?;
+                            let ret = call_site.try_as_basic_value().left().ok_or_else(|| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    format!("method {} returned void", mangled),
+                                )
+                            })?;
+                            return Ok(ret.into_int_value());
+                        }
+                    }
+                }
+                Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    format!("unknown method: .{}", method),
+                ))
+            }
         }
     }
 

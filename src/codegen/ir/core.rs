@@ -99,6 +99,8 @@ impl IrBuilder {
                     .map(|(_, ty)| Self::llvm_type(ty, ctx))
                     .collect();
                 struct_type.set_body(&field_types, false);
+                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                self.struct_fields.insert(name.clone(), field_names);
             }
             Stmt::Enum(name, variants, _) => {
                 let context = ctx.module().get_context();
@@ -123,6 +125,16 @@ impl IrBuilder {
                 enum_struct.set_body(&[i32_type.into(), payload_type], false);
                 let variant_names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
                 ctx.register_enum(name.clone(), variant_names);
+            }
+            Stmt::Impl(struct_name, _trait, methods, _) => {
+                for method in methods {
+                    if let Stmt::Function(name, params, ret, body, _span) = method {
+                        let mangled = format!("{}_{}", struct_name, name);
+                        self.methods
+                            .insert((struct_name.clone(), name.clone()), mangled.clone());
+                        self.build_fn(&mangled, params, ret, body, ctx)?;
+                    }
+                }
             }
             _ => {}
         }
@@ -195,6 +207,9 @@ impl IrBuilder {
                 )
             })?;
             ctx.register_variable(pname.clone(), ptr);
+            if self.struct_fields.contains_key(_pty) {
+                self.var_types.insert(pname.clone(), _pty.clone());
+            }
         }
 
         for (idx, stmt) in body.iter().enumerate() {

@@ -115,6 +115,14 @@ impl IrBuilder {
                     self.string_vars.insert(name.to_string());
                     self.array_sizes.insert(name.to_string(), s.len() as u32);
                 }
+                Expr::StructInit(struct_name, _, _) => {
+                    self.var_types.insert(name.to_string(), struct_name.clone());
+                }
+                Expr::Binary(BinOp::Add, left, right, _) => {
+                    if self.expr_is_string(left) || self.expr_is_string(right) {
+                        self.string_vars.insert(name.to_string());
+                    }
+                }
                 _ => {
                     if type_str == "str" {
                         self.string_vars.insert(name.to_string());

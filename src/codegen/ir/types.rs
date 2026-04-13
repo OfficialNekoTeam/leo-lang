@@ -92,11 +92,27 @@ impl IrBuilder {
                             "int_to_ptr failed".into(),
                         )
                     })?;
-                let field_idx = match field {
+                let field_idx = if let Expr::Ident(var_name, _) = obj {
+                    if let Some(struct_type) = self.var_types.get(var_name) {
+                        if let Some(fields) = self.struct_fields.get(struct_type) {
+                            fields
+                                .iter()
+                                .position(|f| f == field)
+                                .map(|i| i64_type.const_int(i as u64, false))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| match field {
                     "kind" | "x" | "a" => i64_type.const_int(0, false),
                     "value" | "y" | "b" => i64_type.const_int(1, false),
                     _ => i64_type.const_int(0, false),
-                };
+                });
                 let field_ptr = unsafe {
                     ctx.builder()
                         .build_in_bounds_gep(obj_ptr, &[field_idx], "field_ptr")
@@ -620,8 +636,13 @@ impl IrBuilder {
                     "switch failed".into(),
                 )
             })?;
-        for (arm_block, body) in &arm_blocks {
+        for (i, (arm_block, body)) in arm_blocks.iter().enumerate() {
             ctx.builder().position_at_end(*arm_block);
+            // Extract payload bindings for destructuring patterns (e.g., Token::Number(n))
+            let pattern = &arms[i].0;
+            if is_enum_match {
+                self.bind_match_payload(pattern, scrut_val, ctx)?;
+            }
             let result = self.eval_int(body, ctx)?;
             let _ = result;
             self.emit_branch(merge_block, ctx)?;
@@ -632,5 +653,129 @@ impl IrBuilder {
         }
         ctx.builder().position_at_end(merge_block);
         Ok(i64_type.const_int(0, false))
+    }
+
+    /// Route destructuring patterns to payload extraction for enum match arms
+    fn bind_match_payload<'a>(
+        &mut self,
+        pattern: &Expr,
+        scrut_val: inkwell::values::IntValue<'a>,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        if let Expr::Call(callee, bindings, _) = pattern {
+            if let Expr::Ident(name, _) = callee.as_ref() {
+                if name.contains("::") {
+                    let parts: Vec<&str> = name.split("::").collect();
+                    if parts.len() >= 2 {
+                        let payload = self.get_enum_payload_ptr(parts[0], scrut_val, ctx)?;
+                        let i64_type = ctx.module().get_context().i64_type();
+                        let i64_ptr = i64_type.ptr_type(AddressSpace::default());
+                        let payload_i64 = ctx
+                            .builder()
+                            .build_pointer_cast(payload, i64_ptr, "destr_i64")
+                            .map_err(|_| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    "cast payload for destr failed".into(),
+                                )
+                            })?;
+                        return self.bind_payload_fields(bindings, payload_i64, ctx);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get pointer to enum payload area (struct gep index 1) from scrutinee i64 value
+    fn get_enum_payload_ptr<'a>(
+        &mut self,
+        enum_name: &str,
+        scrut_val: inkwell::values::IntValue<'a>,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<inkwell::values::PointerValue<'a>> {
+        let struct_type = ctx.module().get_struct_type(enum_name).ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!("enum {} not defined for destructuring", enum_name),
+            )
+        })?;
+        let struct_ptr = struct_type.ptr_type(AddressSpace::default());
+        let enum_ptr = ctx
+            .builder()
+            .build_int_to_ptr(scrut_val, struct_ptr, "destr_enum")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "int_to_ptr for destr failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_struct_gep(enum_ptr, 1, "destr_payload")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "gep payload for destr failed".into(),
+                )
+            })
+    }
+
+    /// Load each payload field into an alloca and register as local variable
+    fn bind_payload_fields<'a>(
+        &mut self,
+        bindings: &[Expr],
+        payload_i64: inkwell::values::PointerValue<'a>,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        let i64_type = ctx.module().get_context().i64_type();
+        for (j, binding) in bindings.iter().enumerate() {
+            if let Expr::Ident(var_name, _) = binding {
+                let idx = i64_type.const_int(j as u64, false);
+                let field_ptr = unsafe {
+                    ctx.builder()
+                        .build_in_bounds_gep(payload_i64, &[idx], &format!("destr_{}", var_name))
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                format!("gep binding {} failed", var_name),
+                            )
+                        })?
+                };
+                let loaded = ctx
+                    .builder()
+                    .build_load(field_ptr, &format!("destr_val_{}", var_name))
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            format!("load binding {} failed", var_name),
+                        )
+                    })?;
+                let var_ptr = ctx
+                    .builder()
+                    .build_alloca(i64_type, &format!("destr_var_{}", var_name))
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            format!("alloca binding {} failed", var_name),
+                        )
+                    })?;
+                ctx.builder().build_store(var_ptr, loaded).map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        format!("store binding {} failed", var_name),
+                    )
+                })?;
+                ctx.register_variable(var_name.clone(), var_ptr);
+            }
+        }
+        Ok(())
     }
 }
