@@ -2,17 +2,19 @@ use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
 use crate::sema::scope::Scope;
+use std::collections::HashSet;
 use std::mem;
 
 /// Type checker that walks AST and validates types
 pub struct Checker {
     scope: Scope,
+    functions: HashSet<String>,
 }
 
 impl Checker {
     /// Create new checker with root scope
     pub fn new() -> Self {
-        Self { scope: Scope::new() }
+        Self { scope: Scope::new(), functions: HashSet::new() }
     }
 
     /// Check list of statements
@@ -35,6 +37,7 @@ impl Checker {
             Stmt::For(name, iter, body, _) => self.check_for(name, iter, body)?,
             Stmt::Function(name, params, ret, body, _) |
             Stmt::AsyncFunction(name, params, ret, body, _) => {
+                self.functions.insert(name.clone());
                 self.check_fn(name, params, ret, body)?;
             }
             Stmt::Struct(name, fields, _) => self.check_struct(name, fields)?,
@@ -210,7 +213,16 @@ impl Checker {
 
     /// Check function call
     fn check_call(&mut self, callee: &Expr, args: &[Expr]) -> LeoResult<String> {
-        self.check_expr(callee)?;
+        match callee {
+            Expr::Ident(name, _) => {
+                // Allow known functions without scope lookup
+                if !self.functions.contains(name) && self.scope.resolve(name).is_none() {
+                    return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaUndefinedVariable,
+                        format!("undefined function or variable: {}", name)));
+                }
+            }
+            _ => { self.check_expr(callee)?; }
+        }
         for arg in args { self.check_expr(arg)?; }
         Ok("unknown".to_string())
     }

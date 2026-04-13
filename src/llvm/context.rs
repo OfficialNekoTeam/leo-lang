@@ -10,6 +10,7 @@ pub struct LlvmContext<'ctx> {
     builder: Builder<'ctx>,
     functions: HashMap<String, FunctionValue<'ctx>>,
     variables: HashMap<String, PointerValue<'ctx>>,
+    current_fn: Option<FunctionValue<'ctx>>,
 }
 
 impl<'ctx> LlvmContext<'ctx> {
@@ -17,7 +18,7 @@ impl<'ctx> LlvmContext<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
-        Self { module, builder, functions: HashMap::new(), variables: HashMap::new() }
+        Self { module, builder, functions: HashMap::new(), variables: HashMap::new(), current_fn: None }
     }
 
     /// Get reference to module
@@ -52,6 +53,17 @@ impl<'ctx> LlvmContext<'ctx> {
     /// Clear all local variables (called between function bodies)
     pub fn clear_variables(&mut self) {
         self.variables.clear();
+        self.current_fn = None;
+    }
+
+    /// Set the currently-being-compiled function (for return type queries)
+    pub fn set_current_fn(&mut self, fv: FunctionValue<'ctx>) {
+        self.current_fn = Some(fv);
+    }
+
+    /// Get the currently-being-compiled function
+    pub fn current_fn(&self) -> Option<FunctionValue<'ctx>> {
+        self.current_fn
     }
 
     /// Write bitcode to file

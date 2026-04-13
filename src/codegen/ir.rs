@@ -3,6 +3,7 @@ use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
 use crate::llvm::context::LlvmContext;
 use inkwell::types::BasicTypeEnum;
+use inkwell::values::BasicValueEnum;
 use inkwell::IntPredicate;
 use inkwell::AddressSpace;
 
@@ -47,30 +48,59 @@ impl IrBuilder {
         Ok(())
     }
 
-    /// Build LLVM function: create fn value, entry block, compile body, add return
-    fn build_fn(&self, name: &str, _params: &[(String, String)], _ret: &Option<String>, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
+    /// Build LLVM function with params, return type, and body
+    fn build_fn(&self, name: &str, params: &[(String, String)], ret: &Option<String>, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
         ctx.clear_variables();
         let context = ctx.module().get_context();
         let is_main = name == "main";
-        let ret_type = if is_main { context.i32_type().fn_type(&[], false) }
-                       else { context.i64_type().fn_type(&[], false) };
-        let function = ctx.module_mut().add_function(name, ret_type, None);
+
+        let param_types: Vec<BasicTypeEnum> = params.iter()
+            .map(|(_, ty)| Self::llvm_type(ty, ctx))
+            .collect();
+        let param_meta: Vec<_> = param_types.iter().map(|t| (*t).into()).collect();
+
+        let fn_type = if is_main {
+            context.i32_type().fn_type(&param_meta, false)
+        } else {
+            match ret.as_deref() {
+                Some("i32") => context.i32_type().fn_type(&param_meta, false),
+                Some("bool") => context.bool_type().fn_type(&param_meta, false),
+                _ => context.i64_type().fn_type(&param_meta, false),
+            }
+        };
+
+        let function = ctx.module_mut().add_function(name, fn_type, None);
         let entry = context.append_basic_block(function, "entry");
         ctx.builder().position_at_end(entry);
         ctx.register_function(name.to_string(), function);
+        ctx.set_current_fn(function);
+
+        // Alloca + store each parameter as a local variable
+        for (i, (pname, _pty)) in params.iter().enumerate() {
+            let ptr = ctx.builder().build_alloca(param_types[i], pname)
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("alloca param {} failed", pname)))?;
+            let param_val = function.get_nth_param(i as u32)
+                .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("param {} not found", pname)))?;
+            ctx.builder().build_store(ptr, param_val)
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("store param {} failed", pname)))?;
+            ctx.register_variable(pname.clone(), ptr);
+        }
 
         for stmt in body {
             self.build_body_stmt(stmt, ctx)?;
         }
 
-        if is_main {
-            let zero = context.i32_type().const_int(0, false);
-            ctx.builder().build_return(Some(&zero))
-                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
-        } else {
-            let zero = context.i64_type().const_int(0, false);
-            ctx.builder().build_return(Some(&zero))
-                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
+        // Default return (fallback if no explicit return)
+        if !Self::block_is_terminated(ctx) {
+            if is_main {
+                let zero = context.i32_type().const_int(0, false);
+                ctx.builder().build_return(Some(&zero))
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
+            } else {
+                let zero = context.i64_type().const_int(0, false);
+                ctx.builder().build_return(Some(&zero))
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
+            }
         }
         Ok(())
     }
@@ -160,8 +190,7 @@ impl IrBuilder {
         for stmt in body {
             self.build_body_stmt(stmt, ctx)?;
         }
-        ctx.builder().build_unconditional_branch(cond_block)
-            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "branch failed".into()))?;
+        self.emit_branch(cond_block, ctx)?;
 
         ctx.builder().position_at_end(merge_block);
         Ok(())
@@ -215,8 +244,7 @@ impl IrBuilder {
             for stmt in body {
                 self.build_body_stmt(stmt, ctx)?;
             }
-            ctx.builder().build_unconditional_branch(merge_block)
-                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "branch failed".into()))?;
+            self.emit_branch(merge_block, ctx)?;
         }
 
         // Build else body
@@ -225,15 +253,26 @@ impl IrBuilder {
             for stmt in else_stmts {
                 self.build_body_stmt(stmt, ctx)?;
             }
-            ctx.builder().build_unconditional_branch(merge_block)
-                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "branch failed".into()))?;
+            self.emit_branch(merge_block, ctx)?;
         }
 
         ctx.builder().position_at_end(merge_block);
         Ok(())
     }
 
-    /// Evaluate expression and emit output code (print side effect)
+    /// Check if the current basic block already has a terminator
+    fn block_is_terminated(ctx: &LlvmContext) -> bool {
+        ctx.builder().get_insert_block()
+            .map_or(true, |bb| bb.get_terminator().is_some())
+    }
+
+    /// Emit unconditional branch only if block has no terminator yet
+    fn emit_branch(&self, target: inkwell::basic_block::BasicBlock, ctx: &mut LlvmContext) -> LeoResult<()> {
+        if Self::block_is_terminated(ctx) { return Ok(()); }
+        ctx.builder().build_unconditional_branch(target)
+            .map(|_| ())
+            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "branch failed".into()))
+    }
     fn eval_and_emit(&self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
         match expr {
             Expr::String(s, _) => self.emit_puts(s, ctx),
@@ -267,7 +306,7 @@ impl IrBuilder {
         }
     }
 
-    /// Evaluate integer expression (number, bool, binary, unary)
+    /// Evaluate integer expression (number, bool, binary, unary, call)
     fn eval_int<'a>(&self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         match expr {
             Expr::Number(n, _) => Ok(ctx.module().get_context().i64_type().const_int(*n as u64, false)),
@@ -288,16 +327,52 @@ impl IrBuilder {
                 let val = self.eval_int(e, ctx)?;
                 self.emit_unop(op, val, ctx)
             }
+            Expr::Call(callee, args, _) => self.eval_call(callee, args, ctx),
             _ => Ok(ctx.module().get_context().i64_type().const_int(0, false)),
         }
     }
 
-    /// Build explicit return with value
+    /// Evaluate function call: resolve callee, eval args, build_call
+    fn eval_call<'a>(&self, callee: &Expr, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let func_name = match callee {
+            Expr::Ident(name, _) => name.clone(),
+            _ => return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "only direct function calls supported".into())),
+        };
+        let func = ctx.get_function(&func_name)
+            .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined function: {}", func_name)))?;
+
+        let mut arg_values: Vec<_> = Vec::new();
+        for arg in args {
+            let val = self.eval_int(arg, ctx)?;
+            arg_values.push(BasicValueEnum::from(val).into());
+        }
+
+        let call_site = ctx.builder().build_call(func, &arg_values, "call")
+            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("call {} failed", func_name)))?;
+
+        let ret = call_site.try_as_basic_value()
+            .left()
+            .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("{} returned void", func_name)))?;
+        Ok(ret.into_int_value())
+    }
+
+    /// Build explicit return with value, respecting function return type
     fn build_return_with<'a>(&self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<()> {
         let context = ctx.module().get_context();
-        let truncated = ctx.builder().build_int_truncate(val, context.i32_type(), "ret.trunc")
-            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "truncate failed".into()))?;
-        ctx.builder().build_return(Some(&truncated))
+        let ret_val: BasicValueEnum = if let Some(fv) = ctx.current_fn() {
+            let fn_type = fv.get_type();
+            match fn_type.get_return_type() {
+                Some(BasicTypeEnum::IntType(int_ty)) if int_ty == context.i32_type() => {
+                    let trunc = ctx.builder().build_int_truncate(val, context.i32_type(), "ret.trunc")
+                        .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "truncate failed".into()))?;
+                    trunc.into()
+                }
+                _ => val.into(),
+            }
+        } else {
+            val.into()
+        };
+        ctx.builder().build_return(Some(&ret_val))
             .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "return failed".into()))?;
         Ok(())
     }
