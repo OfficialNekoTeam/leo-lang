@@ -1,6 +1,6 @@
-use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult, Span};
 use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
+use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult, Span};
 use crate::lexer::token::{Keyword, Symbol, Token, TokenWithSpan};
 
 /// Recursive descent parser with Pratt expression parsing
@@ -19,7 +19,9 @@ impl Parser {
     pub fn parse(&mut self) -> LeoResult<Vec<Stmt>> {
         let mut stmts = Vec::new();
         while !self.is_eof() {
-            if self.skip_comment() { continue; }
+            if self.skip_comment() {
+                continue;
+            }
             stmts.push(self.parse_stmt()?);
         }
         Ok(stmts)
@@ -45,7 +47,11 @@ impl Parser {
     }
 
     fn prev_span(&self) -> Span {
-        if self.pos > 0 { self.tokens[self.pos - 1].span } else { Span::dummy() }
+        if self.pos > 0 {
+            self.tokens[self.pos - 1].span
+        } else {
+            Span::dummy()
+        }
     }
 
     fn cur_span(&self) -> Span {
@@ -60,16 +66,28 @@ impl Parser {
     fn expect_sym(&mut self, sym: Symbol) -> LeoResult<Span> {
         let tws = self.peek().ok_or_else(|| self.eof_err("symbol"))?;
         match &tws.token {
-            Token::Symbol(s) if *s == sym => { let s = tws.span; self.advance(); Ok(s) }
+            Token::Symbol(s) if *s == sym => {
+                let s = tws.span;
+                self.advance();
+                Ok(s)
+            }
             _ => Err(self.unexpected(tws)),
         }
     }
 
-    /// Expect identifier, return its name
+    /// Expect identifier (or 'self' keyword as identifier), return its name
     fn expect_ident(&mut self) -> LeoResult<String> {
         let tws = self.peek().ok_or_else(|| self.eof_err("identifier"))?;
         match &tws.token {
-            Token::Identifier(n) => { let n = n.clone(); self.advance(); Ok(n) }
+            Token::Identifier(n) => {
+                let n = n.clone();
+                self.advance();
+                Ok(n)
+            }
+            Token::Keyword(Keyword::Self_) => {
+                self.advance();
+                Ok("self".to_string())
+            }
             _ => Err(self.unexpected(tws)),
         }
     }
@@ -78,7 +96,8 @@ impl Parser {
     fn match_sym(&mut self, sym: Symbol) -> bool {
         if let Some(t) = self.peek() {
             if matches!(&t.token, Token::Symbol(s) if *s == sym) {
-                self.advance(); return true;
+                self.advance();
+                return true;
             }
         }
         false
@@ -88,50 +107,69 @@ impl Parser {
     fn match_kw(&mut self, kw: Keyword) -> bool {
         if let Some(t) = self.peek() {
             if matches!(&t.token, Token::Keyword(k) if *k == kw) {
-                self.advance(); return true;
+                self.advance();
+                return true;
             }
         }
         false
     }
 
     /// Skip optional semicolon
-    fn skip_semi(&mut self) { self.match_sym(Symbol::Semicolon); }
+    fn skip_semi(&mut self) {
+        self.match_sym(Symbol::Semicolon);
+    }
 
     /// Skip comment token
     fn skip_comment(&mut self) -> bool {
         if matches!(self.peek(), Some(t) if matches!(t.token, Token::Comment(_))) {
-            self.advance(); true
-        } else { false }
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if peek token is a specific symbol
     fn is_sym(&self, sym: Symbol) -> bool {
-        self.peek().map_or(false, |t| matches!(&t.token, Token::Symbol(s) if *s == sym))
+        self.peek()
+            .map_or(false, |t| matches!(&t.token, Token::Symbol(s) if *s == sym))
     }
 
     /// Check if current token starts an expression
     fn is_expr_start(&self) -> bool {
         self.peek().map_or(false, |t| match &t.token {
-            Token::Number(_) | Token::Float(_) | Token::String(_) |
-            Token::Char(_) |
-            Token::Identifier(_) | Token::Keyword(Keyword::True) |
-            Token::Keyword(Keyword::False) | Token::Keyword(Keyword::Match) |
-            Token::Symbol(Symbol::LeftParen) |
-            Token::Symbol(Symbol::LeftBracket) |
-            Token::Symbol(Symbol::Bang) |
-            Token::Symbol(Symbol::Minus) => true,
+            Token::Number(_)
+            | Token::Float(_)
+            | Token::String(_)
+            | Token::Char(_)
+            | Token::Identifier(_)
+            | Token::Keyword(Keyword::True)
+            | Token::Keyword(Keyword::False)
+            | Token::Keyword(Keyword::Match)
+            | Token::Keyword(Keyword::Self_)
+            | Token::Symbol(Symbol::LeftParen)
+            | Token::Symbol(Symbol::LeftBracket)
+            | Token::Symbol(Symbol::Bang)
+            | Token::Symbol(Symbol::Minus) => true,
             _ => false,
         })
     }
 
     fn eof_err(&self, expected: &str) -> LeoError {
-        LeoError::new(ErrorKind::Syntax, ErrorCode::ParserUnexpectedToken,
-            format!("expected {} but reached end of input", expected))
+        LeoError::new(
+            ErrorKind::Syntax,
+            ErrorCode::ParserUnexpectedToken,
+            format!("expected {} but reached end of input", expected),
+        )
     }
 
     fn unexpected(&self, tws: &TokenWithSpan) -> LeoError {
-        LeoError::new(ErrorKind::Syntax, ErrorCode::ParserUnexpectedToken,
-            format!("unexpected token: {:?}", tws.token)).with_span(tws.span)
+        LeoError::new(
+            ErrorKind::Syntax,
+            ErrorCode::ParserUnexpectedToken,
+            format!("unexpected token: {:?}", tws.token),
+        )
+        .with_span(tws.span)
     }
 
     // --- Statement parsing ---
@@ -142,7 +180,10 @@ impl Parser {
         match &tws.token {
             Token::Keyword(Keyword::Let) => self.parse_let(),
             Token::Keyword(Keyword::Fn) => self.parse_fn(false),
-            Token::Keyword(Keyword::Async) => { self.advance(); self.parse_fn(true) }
+            Token::Keyword(Keyword::Async) => {
+                self.advance();
+                self.parse_fn(true)
+            }
             Token::Keyword(Keyword::Return) => self.parse_return(),
             Token::Keyword(Keyword::If) => self.parse_if(),
             Token::Keyword(Keyword::While) => self.parse_while(),
@@ -151,6 +192,7 @@ impl Parser {
             Token::Keyword(Keyword::Struct) => self.parse_struct(),
             Token::Keyword(Keyword::Enum) => self.parse_enum_decl(),
             Token::Keyword(Keyword::Const) => self.parse_const(),
+            Token::Keyword(Keyword::Impl) => self.parse_impl(),
             Token::Keyword(Keyword::Pub) => {
                 self.advance();
                 Ok(Stmt::Pub(Box::new(self.parse_stmt()?)))
@@ -158,7 +200,11 @@ impl Parser {
             Token::Keyword(Keyword::Break) => {
                 let span = self.cur_span();
                 self.advance();
-                let expr = if self.is_expr_start() { Some(self.parse_expr()?) } else { None };
+                let expr = if self.is_expr_start() {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
                 self.skip_semi();
                 Ok(Stmt::Break(expr, span))
             }
@@ -172,7 +218,10 @@ impl Parser {
                 // Try assignment: ident = expr
                 if let Token::Identifier(_) = &tws.token {
                     if self.pos + 1 < self.tokens.len() {
-                        if matches!(self.tokens[self.pos + 1].token, Token::Symbol(Symbol::Equal)) {
+                        if matches!(
+                            self.tokens[self.pos + 1].token,
+                            Token::Symbol(Symbol::Equal)
+                        ) {
                             return self.parse_assign();
                         }
                     }
@@ -188,8 +237,16 @@ impl Parser {
     fn parse_let(&mut self) -> LeoResult<Stmt> {
         self.advance();
         let name = self.expect_ident()?;
-        let ty = if self.match_sym(Symbol::Colon) { Some(self.expect_ident()?) } else { None };
-        let init = if self.match_sym(Symbol::Equal) { Some(self.parse_expr()?) } else { None };
+        let ty = if self.match_sym(Symbol::Colon) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        let init = if self.match_sym(Symbol::Equal) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         self.skip_semi();
         Ok(Stmt::Let(name, ty, init))
     }
@@ -202,23 +259,34 @@ impl Parser {
         self.expect_sym(Symbol::LeftParen)?;
         let params = self.parse_params()?;
         self.expect_sym(Symbol::RightParen)?;
-        let ret = if self.match_sym(Symbol::Arrow) { Some(self.expect_ident()?) } else { None };
+        let ret = if self.match_sym(Symbol::Arrow) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
         let body = self.parse_block()?;
         let span = self.merge(start, self.prev_span());
-        if is_async { Ok(Stmt::AsyncFunction(name, params, ret, body, span)) }
-        else { Ok(Stmt::Function(name, params, ret, body, span)) }
+        if is_async {
+            Ok(Stmt::AsyncFunction(name, params, ret, body, span))
+        } else {
+            Ok(Stmt::Function(name, params, ret, body, span))
+        }
     }
 
     /// Parse comma-separated params: name: Type, ...
     fn parse_params(&mut self) -> LeoResult<Vec<(String, String)>> {
         let mut params = Vec::new();
         loop {
-            if self.is_sym(Symbol::RightParen) { break; }
+            if self.is_sym(Symbol::RightParen) {
+                break;
+            }
             let name = self.expect_ident()?;
             self.expect_sym(Symbol::Colon)?;
             let ty = self.expect_ident()?;
             params.push((name, ty));
-            if !self.match_sym(Symbol::Comma) { break; }
+            if !self.match_sym(Symbol::Comma) {
+                break;
+            }
         }
         Ok(params)
     }
@@ -228,7 +296,9 @@ impl Parser {
         self.expect_sym(Symbol::LeftBrace)?;
         let mut stmts = Vec::new();
         while !self.is_eof() && !self.match_sym(Symbol::RightBrace) {
-            if self.skip_comment() { continue; }
+            if self.skip_comment() {
+                continue;
+            }
             stmts.push(self.parse_stmt()?);
         }
         Ok(stmts)
@@ -238,7 +308,11 @@ impl Parser {
     fn parse_return(&mut self) -> LeoResult<Stmt> {
         let span = self.cur_span();
         self.advance();
-        let expr = if self.is_expr_start() { Some(self.parse_expr()?) } else { None };
+        let expr = if self.is_expr_start() {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         self.skip_semi();
         Ok(Stmt::Return(expr, span))
     }
@@ -262,7 +336,12 @@ impl Parser {
         self.expect_sym(Symbol::Equal)?;
         let expr = self.parse_expr()?;
         self.skip_semi();
-        Ok(Stmt::Const(name, ty, expr, self.merge(span, self.prev_span())))
+        Ok(Stmt::Const(
+            name,
+            ty,
+            expr,
+            self.merge(span, self.prev_span()),
+        ))
     }
 
     /// Parse if: if expr { stmts } [else { stmts }] or else if chain
@@ -273,7 +352,10 @@ impl Parser {
         let then = self.parse_block()?;
         let mut branches = vec![(cond, then)];
         let els = if self.match_kw(Keyword::Else) {
-            if self.peek().map_or(false, |t| matches!(&t.token, Token::Keyword(Keyword::If))) {
+            if self
+                .peek()
+                .map_or(false, |t| matches!(&t.token, Token::Keyword(Keyword::If)))
+            {
                 let else_if = self.parse_if()?;
                 match else_if {
                     Stmt::If(inner_branches, inner_else, _span) => {
@@ -307,11 +389,18 @@ impl Parser {
         let name = self.expect_ident()?;
         // consume optional 'in' (tokenized as identifier)
         if let Some(t) = self.peek() {
-            if matches!(&t.token, Token::Identifier(s) if s == "in") { self.advance(); }
+            if matches!(&t.token, Token::Identifier(s) if s == "in") {
+                self.advance();
+            }
         }
         let iter = self.parse_expr()?;
         let body = self.parse_block()?;
-        Ok(Stmt::For(name, iter, body, self.merge(start, self.prev_span())))
+        Ok(Stmt::For(
+            name,
+            iter,
+            body,
+            self.merge(start, self.prev_span()),
+        ))
     }
 
     /// Parse import: import name [{ items }]
@@ -327,8 +416,14 @@ impl Parser {
             }
             self.expect_sym(Symbol::RightBrace)?;
             Some(v)
-        } else { None };
-        Ok(Stmt::Import(name, items, self.merge(start, self.prev_span())))
+        } else {
+            None
+        };
+        Ok(Stmt::Import(
+            name,
+            items,
+            self.merge(start, self.prev_span()),
+        ))
     }
 
     /// Parse struct: struct Name { field: Type, ... }
@@ -346,7 +441,38 @@ impl Parser {
             self.match_sym(Symbol::Comma);
         }
         self.expect_sym(Symbol::RightBrace)?;
-        Ok(Stmt::Struct(name, fields, self.merge(start, self.prev_span())))
+        Ok(Stmt::Struct(
+            name,
+            fields,
+            self.merge(start, self.prev_span()),
+        ))
+    }
+
+    /// Parse impl block: impl StructName { fn method(...) { ... } ... }
+    fn parse_impl(&mut self) -> LeoResult<Stmt> {
+        let start = self.cur_span();
+        self.advance();
+        let name = self.expect_ident()?;
+        let trait_name = if self.match_sym(Symbol::Colon) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        self.expect_sym(Symbol::LeftBrace)?;
+        let mut methods = Vec::new();
+        while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
+            if self.skip_comment() {
+                continue;
+            }
+            methods.push(self.parse_fn(false)?);
+        }
+        self.expect_sym(Symbol::RightBrace)?;
+        Ok(Stmt::Impl(
+            name,
+            trait_name,
+            methods,
+            self.merge(start, self.prev_span()),
+        ))
     }
 
     // --- Expression parsing (Pratt precedence climbing) ---
@@ -360,8 +486,12 @@ impl Parser {
     fn parse_prec(&mut self, min: u8) -> LeoResult<Expr> {
         let mut left = self.parse_unary()?;
         loop {
-            let Some((op, prec)) = self.peek_binop() else { break };
-            if prec < min { break; }
+            let Some((op, prec)) = self.peek_binop() else {
+                break;
+            };
+            if prec < min {
+                break;
+            }
             self.advance();
             let right = self.parse_prec(prec + 1)?;
             left = Expr::Binary(op, Box::new(left), Box::new(right), Span::dummy());
@@ -373,7 +503,9 @@ impl Parser {
     fn peek_binop(&self) -> Option<(BinOp, u8)> {
         match &self.peek()?.token {
             Token::Symbol(Symbol::Pipe) | Token::Symbol(Symbol::DoublePipe) => Some((BinOp::Or, 1)),
-            Token::Symbol(Symbol::Ampersand) | Token::Symbol(Symbol::DoubleAmpersand) => Some((BinOp::And, 2)),
+            Token::Symbol(Symbol::Ampersand) | Token::Symbol(Symbol::DoubleAmpersand) => {
+                Some((BinOp::And, 2))
+            }
             Token::Symbol(Symbol::DoubleEqual) => Some((BinOp::Eq, 3)),
             Token::Symbol(Symbol::BangEqual) => Some((BinOp::Ne, 3)),
             Token::Symbol(Symbol::Less) => Some((BinOp::Lt, 4)),
@@ -391,9 +523,13 @@ impl Parser {
 
     /// Parse unary: -expr, !expr
     fn parse_unary(&mut self) -> LeoResult<Expr> {
-        let op = if self.match_sym(Symbol::Minus) { Some(UnOp::Neg) }
-                 else if self.match_sym(Symbol::Bang) { Some(UnOp::Not) }
-                 else { None };
+        let op = if self.match_sym(Symbol::Minus) {
+            Some(UnOp::Neg)
+        } else if self.match_sym(Symbol::Bang) {
+            Some(UnOp::Not)
+        } else {
+            None
+        };
         if let Some(op) = op {
             let e = self.parse_unary()?;
             return Ok(Expr::Unary(op, Box::new(e), Span::dummy()));
@@ -427,7 +563,9 @@ impl Parser {
                 let idx = self.parse_expr()?;
                 self.expect_sym(Symbol::RightBracket)?;
                 expr = Expr::Index(Box::new(expr), Box::new(idx), Span::dummy());
-            } else { break; }
+            } else {
+                break;
+            }
         }
         Ok(expr)
     }
@@ -436,21 +574,49 @@ impl Parser {
         let tws = self.peek().ok_or_else(|| self.eof_err("expression"))?;
         let span = tws.span;
         match &tws.token {
-            Token::Number(n) => { let n = *n; self.advance(); Ok(Expr::Number(n, span)) }
-            Token::Float(f) => { let f = *f; self.advance(); Ok(Expr::Float(f, span)) }
-            Token::String(s) => { let s = s.clone(); self.advance(); Ok(Expr::String(s, span)) }
-            Token::Char(c) => { let c = *c; self.advance(); Ok(Expr::Char(c, span)) }
+            Token::Number(n) => {
+                let n = *n;
+                self.advance();
+                Ok(Expr::Number(n, span))
+            }
+            Token::Float(f) => {
+                let f = *f;
+                self.advance();
+                Ok(Expr::Float(f, span))
+            }
+            Token::String(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::String(s, span))
+            }
+            Token::Char(c) => {
+                let c = *c;
+                self.advance();
+                Ok(Expr::Char(c, span))
+            }
             Token::Identifier(n) => {
                 let name = n.clone();
                 let name_span = span;
                 self.advance();
-                if self.is_sym(Symbol::LeftBrace) && name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                if self.is_sym(Symbol::LeftBrace)
+                    && name.chars().next().map_or(false, |c| c.is_uppercase())
+                {
                     return self.parse_struct_init(name, name_span);
                 }
                 Ok(Expr::Ident(name, name_span))
             }
-            Token::Keyword(Keyword::True) => { self.advance(); Ok(Expr::Bool(true, span)) }
-            Token::Keyword(Keyword::False) => { self.advance(); Ok(Expr::Bool(false, span)) }
+            Token::Keyword(Keyword::True) => {
+                self.advance();
+                Ok(Expr::Bool(true, span))
+            }
+            Token::Keyword(Keyword::False) => {
+                self.advance();
+                Ok(Expr::Bool(false, span))
+            }
+            Token::Keyword(Keyword::Self_) => {
+                self.advance();
+                Ok(Expr::Ident("self".to_string(), span))
+            }
             Token::Symbol(Symbol::LeftParen) => {
                 self.advance();
                 let e = self.parse_expr()?;
@@ -482,7 +648,9 @@ impl Parser {
         }
         let mut elements = vec![first];
         while self.match_sym(Symbol::Comma) {
-            if self.is_sym(Symbol::RightBracket) { break; }
+            if self.is_sym(Symbol::RightBracket) {
+                break;
+            }
             elements.push(self.parse_expr()?);
         }
         self.expect_sym(Symbol::RightBracket)?;
@@ -518,7 +686,10 @@ impl Parser {
                     self.match_sym(Symbol::Comma);
                 }
                 self.expect_sym(Symbol::RightParen)?;
-                exprs.iter().map(|s| Expr::Ident(s.clone(), Span::dummy())).collect()
+                exprs
+                    .iter()
+                    .map(|s| Expr::Ident(s.clone(), Span::dummy()))
+                    .collect()
             } else {
                 vec![]
             };
@@ -526,7 +697,11 @@ impl Parser {
             self.match_sym(Symbol::Comma);
         }
         self.expect_sym(Symbol::RightBrace)?;
-        Ok(Stmt::Enum(name, variants, self.merge(start, self.prev_span())))
+        Ok(Stmt::Enum(
+            name,
+            variants,
+            self.merge(start, self.prev_span()),
+        ))
     }
 
     fn parse_match_expr(&mut self, start: Span) -> LeoResult<Expr> {
@@ -573,11 +748,29 @@ impl Parser {
                 }
                 Ok(Expr::Ident(name, span))
             }
-            Token::Number(n) => { let n = *n; self.advance(); Ok(Expr::Number(n, span)) }
-            Token::String(s) => { let s = s.clone(); self.advance(); Ok(Expr::String(s, span)) }
-            Token::Char(c) => { let c = *c; self.advance(); Ok(Expr::Char(c, span)) }
-            Token::Keyword(Keyword::True) => { self.advance(); Ok(Expr::Bool(true, span)) }
-            Token::Keyword(Keyword::False) => { self.advance(); Ok(Expr::Bool(false, span)) }
+            Token::Number(n) => {
+                let n = *n;
+                self.advance();
+                Ok(Expr::Number(n, span))
+            }
+            Token::String(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::String(s, span))
+            }
+            Token::Char(c) => {
+                let c = *c;
+                self.advance();
+                Ok(Expr::Char(c, span))
+            }
+            Token::Keyword(Keyword::True) => {
+                self.advance();
+                Ok(Expr::Bool(true, span))
+            }
+            Token::Keyword(Keyword::False) => {
+                self.advance();
+                Ok(Expr::Bool(false, span))
+            }
             _ => Err(self.unexpected(tws)),
         }
     }
@@ -617,7 +810,10 @@ mod tests {
     #[test]
     fn test_parse_binary_precedence() {
         let stmts = parse_src("1 + 2 * 3");
-        assert!(matches!(&stmts[0], Stmt::Expr(Expr::Binary(BinOp::Add, ..))));
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Expr(Expr::Binary(BinOp::Add, ..))
+        ));
     }
 
     #[test]
@@ -644,5 +840,48 @@ mod tests {
         // 'break' not parsed as keyword, falls to expr -> error is ok
         // test while dispatch works
         assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_impl() {
+        let stmts = parse_src("impl Foo { fn bar(self: Foo) -> i64 { return 1 } }");
+        assert!(
+            matches!(&stmts[0], Stmt::Impl(name, _, methods, _) if name == "Foo" && methods.len() == 1)
+        );
+    }
+
+    #[test]
+    fn test_parse_enum_with_payload() {
+        let stmts = parse_src("enum Token { Number(i64), Eof }");
+        if let Stmt::Enum(name, variants, _) = &stmts[0] {
+            assert_eq!(name, "Token");
+            assert_eq!(variants.len(), 2);
+            assert_eq!(variants[0].0, "Number");
+            assert_eq!(variants[1].0, "Eof");
+        } else {
+            panic!("expected Enum");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_destruct() {
+        let stmts = parse_src("match x { Token::Number(n) => n }");
+        if let Stmt::Expr(Expr::Match(_, arms, _)) = &stmts[0] {
+            assert_eq!(arms.len(), 1);
+            assert!(matches!(&arms[0].0, Expr::Call(..)));
+        } else {
+            panic!("expected Match");
+        }
+    }
+
+    #[test]
+    fn test_parse_self_in_fn() {
+        let stmts = parse_src("fn get(self: Point) -> i64 { return self.x }");
+        if let Stmt::Function(name, params, _, _, _) = &stmts[0] {
+            assert_eq!(name, "get");
+            assert_eq!(params[0].0, "self");
+        } else {
+            panic!("expected Function");
+        }
     }
 }
