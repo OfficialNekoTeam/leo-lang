@@ -46,19 +46,29 @@ impl Checker {
         Ok(())
     }
 
+    /// Check match pattern: enum destructuring args are bindings, not value expressions
     fn check_pattern(&mut self, pattern: &Expr) -> LeoResult<()> {
         match pattern {
             Expr::Ident(name, _) => {
-                if name == "_" {
-                    return Ok(());
-                }
-                if name.contains("::") {
+                if name == "_" || name.contains("::") {
                     return Ok(());
                 }
                 self.check_expr(pattern)?;
             }
             Expr::Call(callee, args, _) => {
                 self.check_pattern(callee)?;
+                // Enum destructuring: args like Number(n) are variable bindings
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    if name.contains("::") {
+                        for arg in args {
+                            if let Expr::Ident(var_name, _) = arg {
+                                self.scope
+                                    .define(var_name.clone(), "unknown".to_string(), true);
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 for arg in args {
                     self.check_expr(arg)?;
                 }
@@ -101,7 +111,16 @@ impl Checker {
             Stmt::Const(name, _, _, _) => {
                 self.constants.insert(name.clone());
             }
-            Stmt::Trait(_, _, _) | Stmt::Impl(_, _, _, _) => {}
+            Stmt::Trait(_, _, _) => {}
+            Stmt::Impl(struct_name, _trait_name, methods, _) => {
+                for method in methods {
+                    if let Stmt::Function(name, params, ret, body, _) = method {
+                        let mangled = format!("{}_{}", struct_name, name);
+                        self.functions.insert(mangled.clone());
+                        self.check_fn(&mangled, params, ret, body)?;
+                    }
+                }
+            }
             Stmt::Pub(inner) => {
                 self.check_stmt(inner)?;
             }
@@ -209,12 +228,9 @@ impl Checker {
         Ok(())
     }
 
-    /// Check enum variants
+    /// Check enum variants — payload expressions are type names (i64, str), not values
     fn check_enum(&mut self, name: &str, variants: &[(String, Vec<Expr>)]) -> LeoResult<()> {
-        for (i, (vname, exprs)) in variants.iter().enumerate() {
-            for e in exprs {
-                self.check_expr(e)?;
-            }
+        for (i, (vname, _exprs)) in variants.iter().enumerate() {
             let qualified = format!("{}::{}", name, vname);
             self.enum_variants
                 .insert(qualified.clone(), (name.to_string(), i as u32));
