@@ -115,7 +115,7 @@ impl Parser {
             Token::Number(_) | Token::Float(_) | Token::String(_) |
             Token::Char(_) |
             Token::Identifier(_) | Token::Keyword(Keyword::True) |
-            Token::Keyword(Keyword::False) |
+            Token::Keyword(Keyword::False) | Token::Keyword(Keyword::Match) |
             Token::Symbol(Symbol::LeftParen) |
             Token::Symbol(Symbol::LeftBracket) |
             Token::Symbol(Symbol::Bang) |
@@ -149,6 +149,7 @@ impl Parser {
             Token::Keyword(Keyword::For) => self.parse_for(),
             Token::Keyword(Keyword::Import) => self.parse_import(),
             Token::Keyword(Keyword::Struct) => self.parse_struct(),
+            Token::Keyword(Keyword::Enum) => self.parse_enum_decl(),
             Token::Keyword(Keyword::Const) => self.parse_const(),
             Token::Keyword(Keyword::Pub) => {
                 self.advance();
@@ -415,6 +416,13 @@ impl Parser {
             } else if self.match_sym(Symbol::Dot) {
                 let name = self.expect_ident()?;
                 expr = Expr::Select(Box::new(expr), name, Span::dummy());
+            } else if self.match_sym(Symbol::DoubleColon) {
+                let variant = self.expect_ident()?;
+                let qualified = match &expr {
+                    Expr::Ident(name, _) => format!("{}::{}", name, variant),
+                    _ => variant,
+                };
+                expr = Expr::Ident(qualified, Span::dummy());
             } else if self.match_sym(Symbol::LeftBracket) {
                 let idx = self.parse_expr()?;
                 self.expect_sym(Symbol::RightBracket)?;
@@ -453,6 +461,10 @@ impl Parser {
                 self.advance();
                 self.parse_array_literal(span)
             }
+            Token::Keyword(Keyword::Match) => {
+                self.advance();
+                self.parse_match_expr(span)
+            }
             _ => Err(self.unexpected(tws)),
         }
     }
@@ -489,6 +501,85 @@ impl Parser {
         }
         self.expect_sym(Symbol::RightBrace)?;
         Ok(Expr::StructInit(name, fields, start))
+    }
+
+    fn parse_enum_decl(&mut self) -> LeoResult<Stmt> {
+        let start = self.cur_span();
+        self.advance();
+        let name = self.expect_ident()?;
+        self.expect_sym(Symbol::LeftBrace)?;
+        let mut variants = Vec::new();
+        while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
+            let vname = self.expect_ident()?;
+            let payload = if self.match_sym(Symbol::LeftParen) {
+                let mut exprs = Vec::new();
+                while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                    exprs.push(self.expect_ident()?);
+                    self.match_sym(Symbol::Comma);
+                }
+                self.expect_sym(Symbol::RightParen)?;
+                exprs.iter().map(|s| Expr::Ident(s.clone(), Span::dummy())).collect()
+            } else {
+                vec![]
+            };
+            variants.push((vname, payload));
+            self.match_sym(Symbol::Comma);
+        }
+        self.expect_sym(Symbol::RightBrace)?;
+        Ok(Stmt::Enum(name, variants, self.merge(start, self.prev_span())))
+    }
+
+    fn parse_match_expr(&mut self, start: Span) -> LeoResult<Expr> {
+        let scrutinee = self.parse_expr()?;
+        self.expect_sym(Symbol::LeftBrace)?;
+        let mut arms = Vec::new();
+        while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
+            let pattern = self.parse_match_pattern()?;
+            self.expect_sym(Symbol::FatArrow)?;
+            let body = self.parse_expr()?;
+            arms.push((pattern, body));
+            self.match_sym(Symbol::Comma);
+        }
+        self.expect_sym(Symbol::RightBrace)?;
+        Ok(Expr::Match(Box::new(scrutinee), arms, start))
+    }
+
+    fn parse_match_pattern(&mut self) -> LeoResult<Expr> {
+        let tws = self.peek().ok_or_else(|| self.eof_err("pattern"))?;
+        let span = tws.span;
+        match &tws.token {
+            Token::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                if name == "_" {
+                    return Ok(Expr::Ident("_".to_string(), span));
+                }
+                if self.match_sym(Symbol::DoubleColon) {
+                    let variant = self.expect_ident()?;
+                    if self.match_sym(Symbol::LeftParen) {
+                        let mut bindings = Vec::new();
+                        while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                            bindings.push(self.parse_expr()?);
+                            self.match_sym(Symbol::Comma);
+                        }
+                        self.expect_sym(Symbol::RightParen)?;
+                        return Ok(Expr::Call(
+                            Box::new(Expr::Ident(format!("{}::{}", name, variant), span)),
+                            bindings,
+                            span,
+                        ));
+                    }
+                    return Ok(Expr::Ident(format!("{}::{}", name, variant), span));
+                }
+                Ok(Expr::Ident(name, span))
+            }
+            Token::Number(n) => { let n = *n; self.advance(); Ok(Expr::Number(n, span)) }
+            Token::String(s) => { let s = s.clone(); self.advance(); Ok(Expr::String(s, span)) }
+            Token::Char(c) => { let c = *c; self.advance(); Ok(Expr::Char(c, span)) }
+            Token::Keyword(Keyword::True) => { self.advance(); Ok(Expr::Bool(true, span)) }
+            Token::Keyword(Keyword::False) => { self.advance(); Ok(Expr::Bool(false, span)) }
+            _ => Err(self.unexpected(tws)),
+        }
     }
 }
 

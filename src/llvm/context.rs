@@ -4,13 +4,17 @@ use inkwell::builder::Builder;
 use inkwell::values::{FunctionValue, PointerValue};
 use std::collections::HashMap;
 
-/// Wrapper around LLVM module, builder, and variable/function tables
+pub struct EnumDef {
+    pub variants: Vec<String>,
+}
+
 pub struct LlvmContext<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     functions: HashMap<String, FunctionValue<'ctx>>,
     variables: HashMap<String, PointerValue<'ctx>>,
     current_fn: Option<FunctionValue<'ctx>>,
+    enums: HashMap<String, EnumDef>,
 }
 
 impl<'ctx> LlvmContext<'ctx> {
@@ -18,7 +22,7 @@ impl<'ctx> LlvmContext<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
-        Self { module, builder, functions: HashMap::new(), variables: HashMap::new(), current_fn: None }
+        Self { module, builder, functions: HashMap::new(), variables: HashMap::new(), current_fn: None, enums: HashMap::new() }
     }
 
     /// Get reference to module
@@ -64,6 +68,20 @@ impl<'ctx> LlvmContext<'ctx> {
     /// Get the currently-being-compiled function
     pub fn current_fn(&self) -> Option<FunctionValue<'ctx>> {
         self.current_fn
+    }
+
+    pub fn register_enum(&mut self, name: String, variants: Vec<String>) {
+        self.enums.insert(name, EnumDef { variants });
+    }
+
+    pub fn get_enum(&self, name: &str) -> Option<&EnumDef> {
+        self.enums.get(name)
+    }
+
+    pub fn get_enum_variant_tag(&self, enum_name: &str, variant_name: &str) -> Option<u32> {
+        self.enums.get(enum_name).and_then(|edef| {
+            edef.variants.iter().position(|v| v == variant_name).map(|i| i as u32)
+        })
     }
 
     /// Write bitcode to file

@@ -2,14 +2,14 @@ use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
 use crate::sema::scope::Scope;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 
-/// Type checker that walks AST and validates types
 pub struct Checker {
     scope: Scope,
     functions: HashSet<String>,
     constants: HashSet<String>,
+    enum_variants: HashMap<String, (String, u32)>,
 }
 
 impl Checker {
@@ -24,7 +24,7 @@ impl Checker {
         functions.insert("str_char_at".to_string());
         functions.insert("str_slice".to_string());
         functions.insert("str_concat".to_string());
-        Self { scope: Scope::new(), functions, constants: HashSet::new() }
+        Self { scope: Scope::new(), functions, constants: HashSet::new(), enum_variants: HashMap::new() }
     }
 
     /// Check list of statements
@@ -35,7 +35,22 @@ impl Checker {
         Ok(())
     }
 
-    /// Dispatch statement type check
+    fn check_pattern(&mut self, pattern: &Expr) -> LeoResult<()> {
+        match pattern {
+            Expr::Ident(name, _) => {
+                if name == "_" { return Ok(()); }
+                if name.contains("::") { return Ok(()); }
+                self.check_expr(pattern)?;
+            }
+            Expr::Call(callee, args, _) => {
+                self.check_pattern(callee)?;
+                for arg in args { self.check_expr(arg)?; }
+            }
+            _ => { self.check_expr(pattern)?; }
+        }
+        Ok(())
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt) -> LeoResult<()> {
         match stmt {
             Stmt::Expr(e) => { self.check_expr(e)?; }
@@ -59,7 +74,7 @@ impl Checker {
             }
             Stmt::Trait(_, _, _) | Stmt::Impl(_, _, _, _) => {}
             Stmt::Pub(inner) => { self.check_stmt(inner)?; }
-            Stmt::Enum(_, variants, _) => self.check_enum(variants)?,
+            Stmt::Enum(name, variants, _) => self.check_enum(name, variants)?,
         }
         Ok(())
     }
@@ -142,10 +157,14 @@ impl Checker {
     }
 
     /// Check enum variants
-    fn check_enum(&mut self, variants: &[(String, Vec<Expr>)]) -> LeoResult<()> {
-        for (_, exprs) in variants {
+    fn check_enum(&mut self, name: &str, variants: &[(String, Vec<Expr>)]) -> LeoResult<()> {
+        for (i, (vname, exprs)) in variants.iter().enumerate() {
             for e in exprs { self.check_expr(e)?; }
+            let qualified = format!("{}::{}", name, vname);
+            self.enum_variants.insert(qualified.clone(), (name.to_string(), i as u32));
+            self.functions.insert(qualified);
         }
+        self.scope.define(name.to_string(), format!("enum({})", variants.len()), false);
         Ok(())
     }
 
@@ -192,7 +211,14 @@ impl Checker {
                 Ok("unknown".to_string())
             }
             Expr::Await(e, _) => self.check_expr(e),
-            Expr::Match(_, _, _) => Ok("unknown".to_string()),
+            Expr::Match(scrutinee, arms, _) => {
+                self.check_expr(scrutinee)?;
+                for (pattern, body) in arms {
+                    self.check_pattern(pattern)?;
+                    self.check_expr(body)?;
+                }
+                Ok("unknown".to_string())
+            }
         }
     }
 
