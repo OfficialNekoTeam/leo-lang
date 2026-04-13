@@ -1,6 +1,6 @@
-use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::ast::stmt::Stmt;
+use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::sema::scope::Scope;
 use std::collections::{HashMap, HashSet};
 use std::mem;
@@ -24,7 +24,18 @@ impl Checker {
         functions.insert("str_char_at".to_string());
         functions.insert("str_slice".to_string());
         functions.insert("str_concat".to_string());
-        Self { scope: Scope::new(), functions, constants: HashSet::new(), enum_variants: HashMap::new() }
+        functions.insert("vec_new".to_string());
+        functions.insert("vec_push".to_string());
+        functions.insert("vec_get".to_string());
+        functions.insert("vec_len".to_string());
+        functions.insert("file_read".to_string());
+        functions.insert("file_write".to_string());
+        Self {
+            scope: Scope::new(),
+            functions,
+            constants: HashSet::new(),
+            enum_variants: HashMap::new(),
+        }
     }
 
     /// Check list of statements
@@ -38,42 +49,62 @@ impl Checker {
     fn check_pattern(&mut self, pattern: &Expr) -> LeoResult<()> {
         match pattern {
             Expr::Ident(name, _) => {
-                if name == "_" { return Ok(()); }
-                if name.contains("::") { return Ok(()); }
+                if name == "_" {
+                    return Ok(());
+                }
+                if name.contains("::") {
+                    return Ok(());
+                }
                 self.check_expr(pattern)?;
             }
             Expr::Call(callee, args, _) => {
                 self.check_pattern(callee)?;
-                for arg in args { self.check_expr(arg)?; }
+                for arg in args {
+                    self.check_expr(arg)?;
+                }
             }
-            _ => { self.check_expr(pattern)?; }
+            _ => {
+                self.check_expr(pattern)?;
+            }
         }
         Ok(())
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) -> LeoResult<()> {
         match stmt {
-            Stmt::Expr(e) => { self.check_expr(e)?; }
+            Stmt::Expr(e) => {
+                self.check_expr(e)?;
+            }
             Stmt::Let(name, ty, init) => self.check_let(name, ty, init)?,
-            Stmt::Assign(_, e) | Stmt::MutAssign(_, e) => { self.check_expr(e)?; }
-            Stmt::Return(e, _) => { if let Some(e) = e { self.check_expr(e)?; } }
+            Stmt::Assign(_, e) | Stmt::MutAssign(_, e) => {
+                self.check_expr(e)?;
+            }
+            Stmt::Return(e, _) => {
+                if let Some(e) = e {
+                    self.check_expr(e)?;
+                }
+            }
             Stmt::If(branches, els, _) => self.check_if(branches, els)?,
             Stmt::While(cond, body, _) => self.check_while(cond, body)?,
             Stmt::For(name, iter, body, _) => self.check_for(name, iter, body)?,
-            Stmt::Function(name, params, ret, body, _) |
-            Stmt::AsyncFunction(name, params, ret, body, _) => {
+            Stmt::Function(name, params, ret, body, _)
+            | Stmt::AsyncFunction(name, params, ret, body, _) => {
                 self.functions.insert(name.clone());
                 self.check_fn(name, params, ret, body)?;
             }
             Stmt::Struct(name, fields, _) => self.check_struct(name, fields)?,
             Stmt::Import(_, _, _) | Stmt::FromImport(_, _, _) => {}
-            Stmt::Module(_, body, _) => { self.check(body)?; }
+            Stmt::Module(_, body, _) => {
+                self.check(body)?;
+            }
             Stmt::Break(_, _) | Stmt::Continue(_) => {}
             Stmt::Const(name, _, _, _) => {
                 self.constants.insert(name.clone());
             }
             Stmt::Trait(_, _, _) | Stmt::Impl(_, _, _, _) => {}
-            Stmt::Pub(inner) => { self.check_stmt(inner)?; }
+            Stmt::Pub(inner) => {
+                self.check_stmt(inner)?;
+            }
             Stmt::Enum(name, variants, _) => self.check_enum(name, variants)?,
         }
         Ok(())
@@ -85,18 +116,29 @@ impl Checker {
             Some(e) => Some(self.check_expr(e)?),
             None => None,
         };
-        let final_ty = ty.as_ref().cloned().or(inferred).unwrap_or_else(|| "unknown".to_string());
+        let final_ty = ty
+            .as_ref()
+            .cloned()
+            .or(inferred)
+            .unwrap_or_else(|| "unknown".to_string());
         self.scope.define(name.to_string(), final_ty, true);
         Ok(())
     }
 
     /// Check if with branches
-    fn check_if(&mut self, branches: &[(Expr, Vec<Stmt>)], els: &Option<Vec<Stmt>>) -> LeoResult<()> {
+    fn check_if(
+        &mut self,
+        branches: &[(Expr, Vec<Stmt>)],
+        els: &Option<Vec<Stmt>>,
+    ) -> LeoResult<()> {
         for (cond, body) in branches {
             let cond_ty = self.check_expr(cond)?;
-            if cond_ty != "bool" {
-                return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                    format!("if condition must be bool, got {}", cond_ty)));
+            if cond_ty != "bool" && cond_ty != "unknown" && cond_ty != "i64" {
+                return Err(LeoError::new(
+                    ErrorKind::Semantic,
+                    ErrorCode::SemaTypeMismatch,
+                    format!("if condition must be bool, got {}", cond_ty),
+                ));
             }
             let old = mem::replace(&mut self.scope, Scope::new());
             self.scope = Scope::with_parent(old);
@@ -104,16 +146,21 @@ impl Checker {
             let child = mem::replace(&mut self.scope, Scope::new());
             self.scope = child.into_parent().unwrap_or(Scope::new());
         }
-        if let Some(els) = els { self.check(els)?; }
+        if let Some(els) = els {
+            self.check(els)?;
+        }
         Ok(())
     }
 
     /// Check while loop
     fn check_while(&mut self, cond: &Expr, body: &[Stmt]) -> LeoResult<()> {
         let cond_ty = self.check_expr(cond)?;
-        if cond_ty != "bool" {
-            return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                format!("while condition must be bool, got {}", cond_ty)));
+        if cond_ty != "bool" && cond_ty != "unknown" && cond_ty != "i64" {
+            return Err(LeoError::new(
+                ErrorKind::Semantic,
+                ErrorCode::SemaTypeMismatch,
+                format!("while condition must be bool, got {}", cond_ty),
+            ));
         }
         self.check(body)
     }
@@ -132,7 +179,13 @@ impl Checker {
     }
 
     /// Check function definition
-    fn check_fn(&mut self, name: &str, params: &[(String, String)], _ret: &Option<String>, body: &[Stmt]) -> LeoResult<()> {
+    fn check_fn(
+        &mut self,
+        name: &str,
+        params: &[(String, String)],
+        _ret: &Option<String>,
+        body: &[Stmt],
+    ) -> LeoResult<()> {
         let old = mem::replace(&mut self.scope, Scope::new());
         let mut child = Scope::with_parent(old);
         for (pname, pty) in params {
@@ -159,12 +212,16 @@ impl Checker {
     /// Check enum variants
     fn check_enum(&mut self, name: &str, variants: &[(String, Vec<Expr>)]) -> LeoResult<()> {
         for (i, (vname, exprs)) in variants.iter().enumerate() {
-            for e in exprs { self.check_expr(e)?; }
+            for e in exprs {
+                self.check_expr(e)?;
+            }
             let qualified = format!("{}::{}", name, vname);
-            self.enum_variants.insert(qualified.clone(), (name.to_string(), i as u32));
+            self.enum_variants
+                .insert(qualified.clone(), (name.to_string(), i as u32));
             self.functions.insert(qualified);
         }
-        self.scope.define(name.to_string(), format!("enum({})", variants.len()), false);
+        self.scope
+            .define(name.to_string(), format!("enum({})", variants.len()), false);
         Ok(())
     }
 
@@ -181,10 +238,16 @@ impl Checker {
                 if self.constants.contains(name) {
                     return Ok("i64".to_string());
                 }
-                self.scope.resolve(name)
+                self.scope
+                    .resolve(name)
                     .map(|e| e.ty.clone())
-                    .ok_or_else(|| LeoError::new(ErrorKind::Semantic, ErrorCode::SemaUndefinedVariable,
-                        format!("undefined variable: {}", name)))
+                    .ok_or_else(|| {
+                        LeoError::new(
+                            ErrorKind::Semantic,
+                            ErrorCode::SemaUndefinedVariable,
+                            format!("undefined variable: {}", name),
+                        )
+                    })
             }
             Expr::Binary(op, left, right, _) => self.check_binary(op, left, right),
             Expr::Unary(op, e, _) => self.check_unary(op, e),
@@ -192,7 +255,9 @@ impl Checker {
             Expr::Index(obj, idx, _) => self.check_index(obj, idx),
             Expr::Select(_, _, _) => Ok("unknown".to_string()),
             Expr::Array(elements, _) => {
-                for e in elements { self.check_expr(e)?; }
+                for e in elements {
+                    self.check_expr(e)?;
+                }
                 Ok("array".to_string())
             }
             Expr::ArrayRepeat(val, count, _) => {
@@ -201,13 +266,17 @@ impl Checker {
                 Ok("array".to_string())
             }
             Expr::StructInit(name, fields, _) => {
-                for (_, val) in fields { self.check_expr(val)?; }
+                for (_, val) in fields {
+                    self.check_expr(val)?;
+                }
                 Ok(name.clone())
             }
             Expr::Lambda(params, body, _) => self.check_lambda(params, body),
             Expr::If(_, _, _, _) => Ok("unknown".to_string()),
             Expr::Block(stmts, _) => {
-                for s in stmts { self.check_expr(s)?; }
+                for s in stmts {
+                    self.check_expr(s)?;
+                }
                 Ok("unknown".to_string())
             }
             Expr::Await(e, _) => self.check_expr(e),
@@ -229,12 +298,17 @@ impl Checker {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if lt != rt {
-                    return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                        format!("type mismatch: {} vs {}", lt, rt)));
+                    return Err(LeoError::new(
+                        ErrorKind::Semantic,
+                        ErrorCode::SemaTypeMismatch,
+                        format!("type mismatch: {} vs {}", lt, rt),
+                    ));
                 }
                 Ok(lt)
             }
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Ok("bool".to_string()),
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                Ok("bool".to_string())
+            }
             BinOp::And | BinOp::Or => Ok("bool".to_string()),
             BinOp::BitAnd | BinOp::BitOr | BinOp::Shl | BinOp::Shr => Ok(lt),
         }
@@ -246,24 +320,32 @@ impl Checker {
         match op {
             UnOp::Neg | UnOp::Minus => {
                 if ty != "i64" && ty != "f64" && ty != "i32" {
-                    return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                        format!("cannot negate type {}", ty)));
+                    return Err(LeoError::new(
+                        ErrorKind::Semantic,
+                        ErrorCode::SemaTypeMismatch,
+                        format!("cannot negate type {}", ty),
+                    ));
                 }
                 Ok(ty)
             }
             UnOp::Not => {
                 if ty != "bool" {
-                    return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                        format!("cannot 'not' type {}", ty)));
+                    return Err(LeoError::new(
+                        ErrorKind::Semantic,
+                        ErrorCode::SemaTypeMismatch,
+                        format!("cannot 'not' type {}", ty),
+                    ));
                 }
                 Ok(ty)
             }
             UnOp::Ref => Ok(format!("&{}", ty)),
-            UnOp::Deref => {
-                ty.strip_prefix('&').map(|s| s.to_string())
-                    .ok_or_else(|| LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                        format!("cannot dereference non-pointer type {}", ty)))
-            }
+            UnOp::Deref => ty.strip_prefix('&').map(|s| s.to_string()).ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Semantic,
+                    ErrorCode::SemaTypeMismatch,
+                    format!("cannot dereference non-pointer type {}", ty),
+                )
+            }),
         }
     }
 
@@ -273,13 +355,20 @@ impl Checker {
             Expr::Ident(name, _) => {
                 // Allow known functions without scope lookup
                 if !self.functions.contains(name) && self.scope.resolve(name).is_none() {
-                    return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaUndefinedVariable,
-                        format!("undefined function or variable: {}", name)));
+                    return Err(LeoError::new(
+                        ErrorKind::Semantic,
+                        ErrorCode::SemaUndefinedVariable,
+                        format!("undefined function or variable: {}", name),
+                    ));
                 }
             }
-            _ => { self.check_expr(callee)?; }
+            _ => {
+                self.check_expr(callee)?;
+            }
         }
-        for arg in args { self.check_expr(arg)?; }
+        for arg in args {
+            self.check_expr(arg)?;
+        }
         Ok("unknown".to_string())
     }
 
@@ -288,8 +377,11 @@ impl Checker {
         let obj_ty = self.check_expr(obj)?;
         let idx_ty = self.check_expr(idx)?;
         if idx_ty != "i64" && idx_ty != "i32" {
-            return Err(LeoError::new(ErrorKind::Semantic, ErrorCode::SemaTypeMismatch,
-                format!("index must be integer, got {}", idx_ty)));
+            return Err(LeoError::new(
+                ErrorKind::Semantic,
+                ErrorCode::SemaTypeMismatch,
+                format!("index must be integer, got {}", idx_ty),
+            ));
         }
         Ok(obj_ty)
     }
@@ -313,8 +405,8 @@ impl Checker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::span::Span;
     use crate::ast::expr::Expr;
+    use crate::common::span::Span;
 
     #[test]
     fn test_check_number() {
