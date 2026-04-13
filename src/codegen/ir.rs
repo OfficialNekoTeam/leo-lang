@@ -306,6 +306,7 @@ impl IrBuilder {
      fn eval_and_emit(&self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
          match expr {
              Expr::String(s, _) => self.emit_puts(s, ctx),
+             Expr::Call(_, _, _) => { let _ = self.eval_int(expr, ctx)?; Ok(()) }
              Expr::Ident(name, _) => {
                  let val = self.load_ident(name, ctx)?;
                  self.emit_print_int(val, ctx);
@@ -362,12 +363,22 @@ impl IrBuilder {
         }
     }
 
-    /// Evaluate function call: resolve callee, eval args, build_call
+    /// Evaluate function call: check builtins first, then user functions
     fn eval_call<'a>(&self, callee: &Expr, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         let func_name = match callee {
             Expr::Ident(name, _) => name.clone(),
             _ => return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "only direct function calls supported".into())),
         };
+
+        // Handle builtins: println, print, panic, assert
+        match func_name.as_str() {
+            "println" => return self.builtin_println(args, ctx),
+            "print" => return self.builtin_print(args, ctx),
+            "panic" => return self.builtin_panic(args, ctx),
+            "assert" => return self.builtin_assert(args, ctx),
+            _ => {}
+        }
+
         let func = ctx.get_function(&func_name)
             .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined function: {}", func_name)))?;
 
@@ -384,6 +395,136 @@ impl IrBuilder {
             .left()
             .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("{} returned void", func_name)))?;
         Ok(ret.into_int_value())
+    }
+
+    /// Builtin println(x): prints any basic type followed by newline
+    fn builtin_println<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        if args.is_empty() {
+            self.emit_puts("", ctx)?;
+        } else {
+            self.builtin_print_value(&args[0], ctx, true)?;
+        }
+        Ok(ctx.module().get_context().i64_type().const_int(0, false))
+    }
+
+    /// Builtin print(x): prints without newline
+    fn builtin_print<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        if !args.is_empty() {
+            self.builtin_print_value(&args[0], ctx, false)?;
+        }
+        Ok(ctx.module().get_context().i64_type().const_int(0, false))
+    }
+
+    /// Print a single value (integer or string), with or without newline
+    fn builtin_print_value(&self, expr: &Expr, ctx: &mut LlvmContext, newline: bool) -> LeoResult<()> {
+        match expr {
+            Expr::String(s, _) => {
+                if newline { self.emit_puts(s, ctx)? } else { self.emit_print_str(s, ctx)? }
+            }
+            _ => {
+                let val = self.eval_int(expr, ctx)?;
+                if newline { self.emit_print_int(val, ctx) } else { self.emit_print_int_no_newline(val, ctx) }
+            }
+        }
+        Ok(())
+    }
+
+    /// Builtin panic(msg): print error and call abort()
+    fn builtin_panic<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let msg = match args.first() {
+            Some(Expr::String(s, _)) => s.clone(),
+            _ => "panic".to_string(),
+        };
+        self.emit_puts(&format!("PANIC: {}", msg), ctx)?;
+        self.emit_abort(ctx);
+        Ok(ctx.module().get_context().i64_type().const_int(1, false))
+    }
+
+    /// Builtin assert(cond, msg): panic if condition is false
+    fn builtin_assert<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        if args.is_empty() { return Ok(ctx.module().get_context().i64_type().const_int(0, false)); }
+        let cond_val = self.eval_int(&args[0], ctx)?;
+
+        let function = ctx.builder().get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "no function".into()))?;
+        let context = ctx.module().get_context();
+
+        let pass_block = context.append_basic_block(function, "assert.pass");
+        let fail_block = context.append_basic_block(function, "assert.fail");
+        let zero = context.i64_type().const_int(0, false);
+        let cmp = ctx.builder().build_int_compare(IntPredicate::EQ, cond_val, zero, "assert.check")
+            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "assert compare failed".into()))?;
+        ctx.builder().build_conditional_branch(cmp, fail_block, pass_block)
+            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "assert branch failed".into()))?;
+
+        ctx.builder().position_at_end(fail_block);
+        let msg = match args.get(1) {
+            Some(Expr::String(s, _)) => format!("Assertion failed: {}", s),
+            _ => "Assertion failed".to_string(),
+        };
+        self.emit_puts(&msg, ctx)?;
+        self.emit_abort(ctx);
+
+        ctx.builder().position_at_end(pass_block);
+        Ok(context.i64_type().const_int(0, false))
+    }
+
+    /// Emit abort() call (for panic/assert)
+    fn emit_abort(&self, ctx: &mut LlvmContext) {
+        let abort_fn = ctx.module().get_function("abort")
+            .unwrap_or_else(|| {
+                let void_type = ctx.module().get_context().void_type();
+                ctx.module_mut().add_function("abort", void_type.fn_type(&[], false), None)
+            });
+        ctx.builder().build_call(abort_fn, &[], "abort").ok();
+    }
+
+    /// Emit printf for integer without newline
+    fn emit_print_int_no_newline<'a>(&self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) {
+        let context = ctx.module().get_context();
+        let fmt = "%ld\0".to_string();
+        let gv = ctx.module_mut().add_global(
+            context.i8_type().array_type(fmt.len() as u32),
+            Some(AddressSpace::default()),
+            &format!("__leo_fmt_int_nn_{}", val),
+        );
+        gv.set_initializer(&context.const_string(fmt.as_bytes(), false));
+        gv.set_constant(true);
+        let ptr = gv.as_pointer_value()
+            .const_cast(context.i8_type().ptr_type(AddressSpace::default()));
+        if let Some(printf) = ctx.module().get_function("printf") {
+            ctx.builder().build_call(printf, &[ptr.into(), val.into()], "print_int_nn").ok();
+        }
+    }
+
+    /// Emit printf for string literal without newline
+    fn emit_print_str(&self, s: &str, ctx: &mut LlvmContext) -> LeoResult<()> {
+        let context = ctx.module().get_context();
+        let fmt = format!("%s\0");
+        let str_lit = format!("{}\0", s);
+        let fmt_gv = ctx.module_mut().add_global(
+            context.i8_type().array_type(fmt.len() as u32),
+            Some(AddressSpace::default()),
+            &format!("__leo_fmt_str"),
+        );
+        fmt_gv.set_initializer(&context.const_string(fmt.as_bytes(), false));
+        fmt_gv.set_constant(true);
+        let str_gv = ctx.module_mut().add_global(
+            context.i8_type().array_type(str_lit.len() as u32),
+            Some(AddressSpace::default()),
+            &format!("__leo_str_print_{}", s.len()),
+        );
+        str_gv.set_initializer(&context.const_string(str_lit.as_bytes(), false));
+        str_gv.set_constant(true);
+        let fmt_ptr = fmt_gv.as_pointer_value()
+            .const_cast(context.i8_type().ptr_type(AddressSpace::default()));
+        let str_ptr = str_gv.as_pointer_value()
+            .const_cast(context.i8_type().ptr_type(AddressSpace::default()));
+        if let Some(printf) = ctx.module().get_function("printf") {
+            ctx.builder().build_call(printf, &[fmt_ptr.into(), str_ptr.into()], "print_str").ok();
+        }
+        Ok(())
     }
 
     /// Build explicit return with value, respecting function return type

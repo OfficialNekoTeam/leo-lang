@@ -15,7 +15,12 @@ pub struct Checker {
 impl Checker {
     /// Create new checker with root scope
     pub fn new() -> Self {
-        Self { scope: Scope::new(), functions: HashSet::new(), constants: HashSet::new() }
+        let mut functions = HashSet::new();
+        functions.insert("println".to_string());
+        functions.insert("print".to_string());
+        functions.insert("panic".to_string());
+        functions.insert("assert".to_string());
+        Self { scope: Scope::new(), functions, constants: HashSet::new() }
     }
 
     /// Check list of statements
