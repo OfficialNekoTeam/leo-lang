@@ -164,7 +164,19 @@ impl Parser {
                 self.skip_semi();
                 Ok(Stmt::Continue(span))
             }
-            _ => { let e = self.parse_expr()?; self.skip_semi(); Ok(Stmt::Expr(e)) }
+            _ => {
+                // Try assignment: ident = expr
+                if let Token::Identifier(_) = &tws.token {
+                    if self.pos + 1 < self.tokens.len() {
+                        if matches!(self.tokens[self.pos + 1].token, Token::Symbol(Symbol::Equal)) {
+                            return self.parse_assign();
+                        }
+                    }
+                }
+                let e = self.parse_expr()?;
+                self.skip_semi();
+                Ok(Stmt::Expr(e))
+            }
         }
     }
 
@@ -227,14 +239,38 @@ impl Parser {
         Ok(Stmt::Return(expr, span))
     }
 
-    /// Parse if: if expr { stmts } [else { stmts }]
+    /// Parse assignment: ident = expr
+    fn parse_assign(&mut self) -> LeoResult<Stmt> {
+        let name = self.expect_ident()?;
+        self.expect_sym(Symbol::Equal)?;
+        let expr = self.parse_expr()?;
+        self.skip_semi();
+        Ok(Stmt::Assign(name, expr))
+    }
+
+    /// Parse if: if expr { stmts } [else { stmts }] or else if chain
     fn parse_if(&mut self) -> LeoResult<Stmt> {
         let start = self.cur_span();
         self.advance();
         let cond = self.parse_expr()?;
         let then = self.parse_block()?;
-        let branches = vec![(cond, then)];
-        let els = if self.match_kw(Keyword::Else) { Some(self.parse_block()?) } else { None };
+        let mut branches = vec![(cond, then)];
+        let els = if self.match_kw(Keyword::Else) {
+            if self.peek().map_or(false, |t| matches!(&t.token, Token::Keyword(Keyword::If))) {
+                let else_if = self.parse_if()?;
+                match else_if {
+                    Stmt::If(inner_branches, inner_else, _span) => {
+                        branches.extend(inner_branches);
+                        Some(inner_else.unwrap_or_default())
+                    }
+                    _ => Some(vec![else_if]),
+                }
+            } else {
+                Some(self.parse_block()?)
+            }
+        } else {
+            None
+        };
         Ok(Stmt::If(branches, els, self.merge(start, self.prev_span())))
     }
 
