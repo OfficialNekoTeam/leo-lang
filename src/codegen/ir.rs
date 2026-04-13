@@ -6,6 +6,7 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use inkwell::IntPredicate;
 use inkwell::AddressSpace;
+use inkwell::attributes::AttributeLoc;
 
 /// IR builder that walks AST and emits LLVM IR
 pub struct IrBuilder;
@@ -73,6 +74,13 @@ impl IrBuilder {
         };
 
         let function = ctx.module_mut().add_function(name, fn_type, None);
+
+        // Auto-inline small functions (≤3 body statements, not main)
+        if !is_main && body.len() <= 3 {
+            let always_inline = context.create_enum_attribute(inkwell::attributes::Attribute::get_named_enum_kind_id("alwaysinline"), 0);
+            function.add_attribute(AttributeLoc::Function, always_inline);
+        }
+
         let entry = context.append_basic_block(function, "entry");
         ctx.builder().position_at_end(entry);
         ctx.register_function(name.to_string(), function);
@@ -350,6 +358,12 @@ impl IrBuilder {
             Expr::Bool(b, _) => Ok(ctx.module().get_context().i64_type().const_int(*b as u64, false)),
             Expr::Ident(name, _) => self.load_ident(name, ctx),
             Expr::Binary(op, left, right, _) => {
+                // Constant folding: fold pure integer expressions at compile time
+                if let (Expr::Number(l, _), Expr::Number(r, _)) = (left.as_ref(), right.as_ref()) {
+                    if let Some(folded) = Self::fold_constants(op, *l, *r) {
+                        return Ok(ctx.module().get_context().i64_type().const_int(folded as u64, false));
+                    }
+                }
                 let lv = self.eval_int(left, ctx)?;
                 let rv = self.eval_int(right, ctx)?;
                 self.emit_binop(op, lv, rv, ctx)
@@ -525,6 +539,24 @@ impl IrBuilder {
             ctx.builder().build_call(printf, &[fmt_ptr.into(), str_ptr.into()], "print_str").ok();
         }
         Ok(())
+    }
+
+    /// Fold constant integer arithmetic at compile time
+    fn fold_constants(op: &BinOp, l: i64, r: i64) -> Option<i64> {
+        match op {
+            BinOp::Add => Some(l.wrapping_add(r)),
+            BinOp::Sub => Some(l.wrapping_sub(r)),
+            BinOp::Mul => Some(l.wrapping_mul(r)),
+            BinOp::Div if r != 0 => Some(l / r),
+            BinOp::Mod if r != 0 => Some(l % r),
+            BinOp::Eq => Some(if l == r { 1 } else { 0 }),
+            BinOp::Ne => Some(if l != r { 1 } else { 0 }),
+            BinOp::Lt => Some(if l < r { 1 } else { 0 }),
+            BinOp::Le => Some(if l <= r { 1 } else { 0 }),
+            BinOp::Gt => Some(if l > r { 1 } else { 0 }),
+            BinOp::Ge => Some(if l >= r { 1 } else { 0 }),
+            _ => None,
+        }
     }
 
     /// Build explicit return with value, respecting function return type

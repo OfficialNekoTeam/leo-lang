@@ -41,7 +41,7 @@ impl Generator {
             &triple,
             "generic",
             "",
-            inkwell::OptimizationLevel::Default,
+            inkwell::OptimizationLevel::Aggressive,
             RelocMode::Default,
             CodeModel::Default,
         ).ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
