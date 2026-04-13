@@ -20,6 +20,10 @@ impl Checker {
         functions.insert("print".to_string());
         functions.insert("panic".to_string());
         functions.insert("assert".to_string());
+        functions.insert("str_len".to_string());
+        functions.insert("str_char_at".to_string());
+        functions.insert("str_slice".to_string());
+        functions.insert("str_concat".to_string());
         Self { scope: Scope::new(), functions, constants: HashSet::new() }
     }
 
