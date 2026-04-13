@@ -6,6 +6,8 @@ pub enum Token {
     Number(i64),
     Float(f64),
     String(String),
+    /// Single character literal, e.g. 'a'
+    Char(char),
     Keyword(Keyword),
     Symbol(Symbol),
     Comment(String),

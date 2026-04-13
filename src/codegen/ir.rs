@@ -7,15 +7,21 @@ use inkwell::values::BasicValueEnum;
 use inkwell::IntPredicate;
 use inkwell::AddressSpace;
 use inkwell::attributes::AttributeLoc;
+use std::collections::{HashMap, HashSet};
 
 /// IR builder that walks AST and emits LLVM IR
-pub struct IrBuilder;
+pub struct IrBuilder {
+    array_sizes: HashMap<String, u32>,
+    string_vars: HashSet<String>,
+}
 
 impl IrBuilder {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self { Self { array_sizes: HashMap::new(), string_vars: HashSet::new() } }
 
     /// Build LLVM IR from statements
-    pub fn build(&self, stmts: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
+    pub fn build(&mut self, stmts: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
+        self.array_sizes.clear();
+        self.string_vars.clear();
         self.declare_c_runtime(ctx);
         for stmt in stmts {
             self.build_stmt(stmt, ctx)?;
@@ -24,7 +30,7 @@ impl IrBuilder {
     }
 
     /// Declare external C runtime functions (puts, printf)
-    fn declare_c_runtime(&self, ctx: &mut LlvmContext) {
+    fn declare_c_runtime(&mut self, ctx: &mut LlvmContext) {
         let i8_ptr = ctx.module().get_context().i8_type().ptr_type(AddressSpace::default());
         let i64_type = ctx.module().get_context().i64_type();
         let i32_type = ctx.module().get_context().i32_type();
@@ -38,7 +44,7 @@ impl IrBuilder {
     }
 
     /// Build top-level statement (function definitions, struct declarations)
-    fn build_stmt(&self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_stmt(&mut self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
         match stmt {
             Stmt::Function(name, params, ret, body, _) |
             Stmt::AsyncFunction(name, params, ret, body, _) => {
@@ -48,9 +54,12 @@ impl IrBuilder {
                 self.build_const(name, ty, expr, ctx)?;
             }
             Stmt::Struct(name, fields, _) => {
-                let struct_type = ctx.module().get_context().opaque_struct_type(name);
-                let _ = struct_type;
-                let _ = fields;
+                let context = ctx.module().get_context();
+                let struct_type = context.opaque_struct_type(name);
+                let field_types: Vec<BasicTypeEnum> = fields.iter()
+                    .map(|(_, ty)| Self::llvm_type(ty, ctx))
+                    .collect();
+                struct_type.set_body(&field_types, false);
             }
             _ => {}
         }
@@ -58,7 +67,7 @@ impl IrBuilder {
     }
 
     /// Build LLVM function with params, return type, and body
-    fn build_fn(&self, name: &str, params: &[(String, String)], ret: &Option<String>, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_fn(&mut self, name: &str, params: &[(String, String)], ret: &Option<String>, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
         ctx.clear_variables();
         let context = ctx.module().get_context();
         let is_main = name == "main";
@@ -122,7 +131,7 @@ impl IrBuilder {
     }
 
     /// Build statement inside function body (let, assign, while, if, expr, return)
-    fn build_body_stmt(&self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_body_stmt(&mut self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
         match stmt {
             Stmt::Let(name, ty, init) => {
                 self.build_let(name, ty, init, ctx)?;
@@ -155,7 +164,7 @@ impl IrBuilder {
     }
 
     /// Build const: treated as a global constant (evaluated at compile time)
-    fn build_const(&self, name: &str, ty: &str, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_const(&mut self, name: &str, ty: &str, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let llvm_type = Self::llvm_type(ty, ctx);
         match expr {
@@ -182,7 +191,7 @@ impl IrBuilder {
         }
         Ok(())
     }
-    fn build_let(&self, name: &str, ty: &Option<String>, init: &Option<Expr>, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_let(&mut self, name: &str, ty: &Option<String>, init: &Option<Expr>, ctx: &mut LlvmContext) -> LeoResult<()> {
         let type_str = ty.as_deref().unwrap_or("i64");
         let llvm_type = Self::llvm_type(type_str, ctx);
         let ptr = ctx.builder().build_alloca(llvm_type, name)
@@ -190,6 +199,21 @@ impl IrBuilder {
         ctx.register_variable(name.to_string(), ptr);
 
         if let Some(expr) = init {
+            match expr {
+                Expr::Array(elems, _) => {
+                    self.array_sizes.insert(name.to_string(), elems.len() as u32);
+                }
+                Expr::ArrayRepeat(_, count, _) => {
+                    if let Expr::Number(n, _) = count.as_ref() {
+                        self.array_sizes.insert(name.to_string(), *n as u32);
+                    }
+                }
+                Expr::String(s, _) => {
+                    self.string_vars.insert(name.to_string());
+                    self.array_sizes.insert(name.to_string(), s.len() as u32);
+                }
+                _ => {}
+            }
             let val = self.eval_expr_to_value(expr, ctx)?;
             ctx.builder().build_store(ptr, val)
                 .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("store failed for {}", name)))?;
@@ -198,7 +222,7 @@ impl IrBuilder {
     }
 
     /// Build assignment: load value, store into existing variable
-    fn build_assign(&self, name: &str, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_assign(&mut self, name: &str, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
         let ptr = ctx.get_variable(name)
             .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined variable: {}", name)))?;
         let val = self.eval_expr_to_value(expr, ctx)?;
@@ -208,7 +232,7 @@ impl IrBuilder {
     }
 
     /// Build while loop: condition block → body block → merge block
-    fn build_while(&self, cond: &Expr, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_while(&mut self, cond: &Expr, body: &[Stmt], ctx: &mut LlvmContext) -> LeoResult<()> {
         let function = ctx.builder().get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "no function".into()))?;
@@ -240,7 +264,7 @@ impl IrBuilder {
     }
 
     /// Build if/else-if/else chain using LLVM conditional branches
-    fn build_if(&self, branches: &[(Expr, Vec<Stmt>)], else_body: &Option<Vec<Stmt>>, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn build_if(&mut self, branches: &[(Expr, Vec<Stmt>)], else_body: &Option<Vec<Stmt>>, ctx: &mut LlvmContext) -> LeoResult<()> {
         let function = ctx.builder().get_insert_block()
             .and_then(|bb| bb.get_parent())
             .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "no function".into()))?;
@@ -310,13 +334,13 @@ impl IrBuilder {
     }
 
     /// Emit unconditional branch only if block has no terminator yet
-    fn emit_branch(&self, target: inkwell::basic_block::BasicBlock, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn emit_branch(&mut self, target: inkwell::basic_block::BasicBlock, ctx: &mut LlvmContext) -> LeoResult<()> {
         if Self::block_is_terminated(ctx) { return Ok(()); }
         ctx.builder().build_unconditional_branch(target)
             .map(|_| ())
             .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "branch failed".into()))
     }
-     fn eval_and_emit(&self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
+     fn eval_and_emit(&mut self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
          match expr {
              Expr::String(s, _) => self.emit_puts(s, ctx),
              Expr::Call(_, _, _) => { let _ = self.eval_int(expr, ctx)?; Ok(()) }
@@ -334,7 +358,7 @@ impl IrBuilder {
      }
 
     /// Load identifier value: try local variable, then global constant
-    fn load_ident<'a>(&self, name: &str, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn load_ident<'a>(&mut self, name: &str, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if let Some(ptr) = ctx.get_variable(name) {
             ctx.builder().build_load(ptr, name)
                 .map(|v| v.into_int_value())
@@ -349,7 +373,7 @@ impl IrBuilder {
     }
 
     /// Evaluate expression to an LLVM IntValue (handles ident load, literals, binary, unary)
-    fn eval_expr_to_value<'a>(&self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn eval_expr_to_value<'a>(&mut self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         match expr {
             Expr::Ident(name, _) => self.load_ident(name, ctx),
             _ => self.eval_int(expr, ctx),
@@ -357,13 +381,13 @@ impl IrBuilder {
     }
 
     /// Evaluate integer expression (number, bool, binary, unary, call)
-    fn eval_int<'a>(&self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn eval_int<'a>(&mut self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         match expr {
             Expr::Number(n, _) => Ok(ctx.module().get_context().i64_type().const_int(*n as u64, false)),
             Expr::Bool(b, _) => Ok(ctx.module().get_context().i64_type().const_int(*b as u64, false)),
+            Expr::Char(c, _) => Ok(ctx.module().get_context().i64_type().const_int(*c as u64, false)),
             Expr::Ident(name, _) => self.load_ident(name, ctx),
             Expr::Binary(op, left, right, _) => {
-                // Constant folding: fold pure integer expressions at compile time
                 if let (Expr::Number(l, _), Expr::Number(r, _)) = (left.as_ref(), right.as_ref()) {
                     if let Some(folded) = Self::fold_constants(op, *l, *r) {
                         return Ok(ctx.module().get_context().i64_type().const_int(folded as u64, false));
@@ -378,50 +402,79 @@ impl IrBuilder {
                 self.emit_unop(op, val, ctx)
             }
             Expr::Call(callee, args, _) => self.eval_call(callee, args, ctx),
+            Expr::Index(obj, idx, _) => self.eval_index(obj, idx, ctx),
+            Expr::Select(obj, field, _) => self.eval_select(obj, field, ctx),
+            Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => self.eval_array_alloc(expr, ctx),
+            Expr::StructInit(_, _, _) => self.eval_struct_init(expr, ctx),
             _ => Ok(ctx.module().get_context().i64_type().const_int(0, false)),
         }
     }
 
     /// Evaluate function call: check builtins first, then user functions
-    fn eval_call<'a>(&self, callee: &Expr, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
-        let func_name = match callee {
-            Expr::Ident(name, _) => name.clone(),
-            _ => return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "only direct function calls supported".into())),
-        };
-
-        // Handle builtins: println, print, panic, assert, string ops
-        match func_name.as_str() {
-            "println" => return self.builtin_println(args, ctx),
-            "print" => return self.builtin_print(args, ctx),
-            "panic" => return self.builtin_panic(args, ctx),
-            "assert" => return self.builtin_assert(args, ctx),
-            "str_len" => return self.builtin_str_len(args, ctx),
-            "str_char_at" => return self.builtin_str_char_at(args, ctx),
-            "str_slice" => return self.builtin_str_slice(args, ctx),
-            "str_concat" => return self.builtin_str_concat(args, ctx),
-            _ => {}
+    fn eval_call<'a>(&mut self, callee: &Expr, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        match callee {
+            Expr::Ident(name, _) => {
+                let func_name = name.clone();
+                match func_name.as_str() {
+                    "println" => return self.builtin_println(args, ctx),
+                    "print" => return self.builtin_print(args, ctx),
+                    "panic" => return self.builtin_panic(args, ctx),
+                    "assert" => return self.builtin_assert(args, ctx),
+                    "str_len" => return self.builtin_str_len(args, ctx),
+                    "str_char_at" => return self.builtin_str_char_at(args, ctx),
+                    "str_slice" => return self.builtin_str_slice(args, ctx),
+                    "str_concat" => return self.builtin_str_concat(args, ctx),
+                    _ => {}
+                }
+                let func = ctx.get_function(&func_name)
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined function: {}", func_name)))?;
+                let mut arg_values: Vec<_> = Vec::new();
+                for arg in args {
+                    let val = self.eval_int(arg, ctx)?;
+                    arg_values.push(BasicValueEnum::from(val).into());
+                }
+                let call_site = ctx.builder().build_call(func, &arg_values, "call")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("call {} failed", func_name)))?;
+                let ret = call_site.try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("{} returned void", func_name)))?;
+                Ok(ret.into_int_value())
+            }
+            Expr::Select(obj, method, _) => self.eval_method_call(obj, method, args, ctx),
+            _ => Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "only direct function calls supported".into())),
         }
+    }
 
-        let func = ctx.get_function(&func_name)
-            .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined function: {}", func_name)))?;
-
-        let mut arg_values: Vec<_> = Vec::new();
-        for arg in args {
-            let val = self.eval_int(arg, ctx)?;
-            arg_values.push(BasicValueEnum::from(val).into());
+    fn eval_method_call<'a>(&mut self, obj: &Expr, method: &str, _args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        match method {
+            "len" => {
+                match obj {
+                    Expr::Ident(name, _) => {
+                        if let Some(size) = self.array_sizes.get(name).copied() {
+                            return Ok(i64_type.const_int(size as u64, false));
+                        }
+                        Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
+                            format!("{} has no known length", name)))
+                    }
+                    Expr::String(s, _) => {
+                        Ok(i64_type.const_int(s.len() as u64, false))
+                    }
+                    Expr::Array(elems, _) => {
+                        Ok(i64_type.const_int(elems.len() as u64, false))
+                    }
+                    _ => Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
+                        ".len() only supported on arrays and strings".into())),
+                }
+            }
+            _ => Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
+                format!("unknown method: .{}", method))),
         }
-
-        let call_site = ctx.builder().build_call(func, &arg_values, "call")
-            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("call {} failed", func_name)))?;
-
-        let ret = call_site.try_as_basic_value()
-            .left()
-            .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("{} returned void", func_name)))?;
-        Ok(ret.into_int_value())
     }
 
     /// Builtin println(x): prints any basic type followed by newline
-    fn builtin_println<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_println<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.is_empty() {
             self.emit_puts("", ctx)?;
         } else {
@@ -431,7 +484,7 @@ impl IrBuilder {
     }
 
     /// Builtin print(x): prints without newline
-    fn builtin_print<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_print<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if !args.is_empty() {
             self.builtin_print_value(&args[0], ctx, false)?;
         }
@@ -439,7 +492,7 @@ impl IrBuilder {
     }
 
     /// Print a single value (integer or string), with or without newline
-    fn builtin_print_value(&self, expr: &Expr, ctx: &mut LlvmContext, newline: bool) -> LeoResult<()> {
+    fn builtin_print_value(&mut self, expr: &Expr, ctx: &mut LlvmContext, newline: bool) -> LeoResult<()> {
         match expr {
             Expr::String(s, _) => {
                 if newline { self.emit_puts(s, ctx)? } else { self.emit_print_str(s, ctx)? }
@@ -453,7 +506,7 @@ impl IrBuilder {
     }
 
     /// Builtin panic(msg): print error and call abort()
-    fn builtin_panic<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_panic<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         let msg = match args.first() {
             Some(Expr::String(s, _)) => s.clone(),
             _ => "panic".to_string(),
@@ -464,7 +517,7 @@ impl IrBuilder {
     }
 
     /// Builtin assert(cond, msg): panic if condition is false
-    fn builtin_assert<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_assert<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.is_empty() { return Ok(ctx.module().get_context().i64_type().const_int(0, false)); }
         let cond_val = self.eval_int(&args[0], ctx)?;
 
@@ -494,7 +547,7 @@ impl IrBuilder {
     }
 
     /// Emit abort() call (for panic/assert)
-    fn emit_abort(&self, ctx: &mut LlvmContext) {
+    fn emit_abort(&mut self, ctx: &mut LlvmContext) {
         let abort_fn = ctx.module().get_function("abort")
             .unwrap_or_else(|| {
                 let void_type = ctx.module().get_context().void_type();
@@ -504,7 +557,7 @@ impl IrBuilder {
     }
 
     /// Builtin str_len(s): returns string length as i64
-    fn builtin_str_len<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_str_len<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.is_empty() { return Ok(ctx.module().get_context().i64_type().const_int(0, false)); }
         let str_ptr = self.eval_string_arg(&args[0], ctx)?;
         let strlen_fn = ctx.module().get_function("strlen")
@@ -515,7 +568,7 @@ impl IrBuilder {
     }
 
     /// Builtin str_char_at(s, i): returns ASCII code of char at index as i64
-    fn builtin_str_char_at<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_str_char_at<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.len() < 2 { return Ok(ctx.module().get_context().i64_type().const_int(0, false)); }
         let str_ptr = self.eval_string_arg(&args[0], ctx)?;
         let idx = self.eval_int(&args[1], ctx)?;
@@ -537,7 +590,7 @@ impl IrBuilder {
     }
 
     /// Builtin str_slice(s, start, end): returns new substring (allocated)
-    fn builtin_str_slice<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_str_slice<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.len() < 3 { return Ok(ctx.module().get_context().i64_type().const_int(0, false)); }
         let str_ptr = self.eval_string_arg(&args[0], ctx)?;
         let start = self.eval_int(&args[1], ctx)?;
@@ -591,7 +644,7 @@ impl IrBuilder {
     }
 
     /// Builtin str_concat(a, b): returns new concatenated string (allocated)
-    fn builtin_str_concat<'a>(&self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn builtin_str_concat<'a>(&mut self, args: &[Expr], ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.len() < 2 { return Ok(ctx.module().get_context().i64_type().const_int(0, false)); }
         let a_ptr = self.eval_string_arg(&args[0], ctx)?;
         let b_ptr = self.eval_string_arg(&args[1], ctx)?;
@@ -636,7 +689,7 @@ impl IrBuilder {
     }
 
     /// Evaluate a string expression to an i8* LLVM pointer value
-    fn eval_string_arg<'a>(&self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::PointerValue<'a>> {
+    fn eval_string_arg<'a>(&mut self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::PointerValue<'a>> {
         match expr {
             Expr::String(s, _) => {
                 let gv = self.emit_string_global(s, ctx);
@@ -649,7 +702,7 @@ impl IrBuilder {
     }
 
     /// Create or reuse a global string constant and return the GlobalValue
-    fn emit_string_global<'a>(&self, s: &str, ctx: &mut LlvmContext<'a>) -> inkwell::values::GlobalValue<'a> {
+    fn emit_string_global<'a>(&mut self, s: &str, ctx: &mut LlvmContext<'a>) -> inkwell::values::GlobalValue<'a> {
         let context = ctx.module().get_context();
         let null_terminated = format!("{}\0", s);
         let gv = ctx.module_mut().add_global(
@@ -663,7 +716,7 @@ impl IrBuilder {
     }
 
     /// Emit printf for integer without newline
-    fn emit_print_int_no_newline<'a>(&self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) {
+    fn emit_print_int_no_newline<'a>(&mut self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) {
         let context = ctx.module().get_context();
         let fmt = "%ld\0".to_string();
         let gv = ctx.module_mut().add_global(
@@ -681,7 +734,7 @@ impl IrBuilder {
     }
 
     /// Emit printf for string literal without newline
-    fn emit_print_str(&self, s: &str, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn emit_print_str(&mut self, s: &str, ctx: &mut LlvmContext) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let fmt = format!("%s\0");
         let str_lit = format!("{}\0", s);
@@ -728,7 +781,7 @@ impl IrBuilder {
     }
 
     /// Build explicit return with value, respecting function return type
-    fn build_return_with<'a>(&self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<()> {
+    fn build_return_with<'a>(&mut self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let ret_val: BasicValueEnum = if let Some(fv) = ctx.current_fn() {
             let fn_type = fv.get_type();
@@ -749,7 +802,7 @@ impl IrBuilder {
     }
 
     /// Emit binary arithmetic/comparison/logic (z-extends comparison results to i64)
-    fn emit_binop<'a>(&self, op: &BinOp, lv: inkwell::values::IntValue<'a>, rv: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn emit_binop<'a>(&mut self, op: &BinOp, lv: inkwell::values::IntValue<'a>, rv: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         let i64_type = ctx.module().get_context().i64_type();
         match op {
             BinOp::Add => ctx.builder().build_int_add(lv, rv, "add"),
@@ -776,7 +829,7 @@ impl IrBuilder {
     }
 
     /// Emit unary operation (negate, bitwise not)
-    fn emit_unop<'a>(&self, op: &UnOp, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+    fn emit_unop<'a>(&mut self, op: &UnOp, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         match op {
             UnOp::Neg | UnOp::Minus => {
                 let zero = ctx.module().get_context().i64_type().const_int(0, false);
@@ -791,7 +844,7 @@ impl IrBuilder {
     }
 
     /// Emit printf("%ld\n", val) to print an i64
-    fn emit_print_int<'a>(&self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) {
+    fn emit_print_int<'a>(&mut self, val: inkwell::values::IntValue<'a>, ctx: &mut LlvmContext<'a>) {
         let context = ctx.module().get_context();
         let fmt = format!("%ld\n\0");
         let gv = ctx.module_mut().add_global(
@@ -809,7 +862,7 @@ impl IrBuilder {
     }
 
     /// Emit puts(string) for string literal
-    fn emit_puts(&self, s: &str, ctx: &mut LlvmContext) -> LeoResult<()> {
+    fn emit_puts(&mut self, s: &str, ctx: &mut LlvmContext) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let fmt = format!("{}\0", s);
         let gv = ctx.module_mut().add_global(
@@ -828,10 +881,166 @@ impl IrBuilder {
         Ok(())
     }
 
+    fn eval_index<'a>(&mut self, obj: &Expr, idx: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let obj_val = self.eval_int(obj, ctx)?;
+        let idx_val = self.eval_int(idx, ctx)?;
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+        let obj_ptr = ctx.builder().build_int_to_ptr(obj_val, i64_ptr_type, "obj_ptr")
+            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "int_to_ptr failed".into()))?;
+        let elem_ptr = unsafe {
+            ctx.builder().build_in_bounds_gep(obj_ptr, &[idx_val], "elem_ptr")
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep failed".into()))?
+        };
+        let loaded = ctx.builder().build_load(elem_ptr, "elem_val")
+            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "load elem failed".into()))?;
+        Ok(loaded.into_int_value())
+    }
+
+    fn eval_select<'a>(&mut self, obj: &Expr, field: &str, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        match field {
+            "len" => {
+                match obj {
+                    Expr::Ident(name, _) => {
+                        let size = self.array_sizes.get(name).copied()
+                            .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
+                                format!("{} has no known length", name)))?;
+                        Ok(i64_type.const_int(size as u64, false))
+                    }
+                    Expr::String(s, _) => {
+                        Ok(i64_type.const_int(s.len() as u64, false))
+                    }
+                    _ => Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
+                        ".len() only supported on named arrays and string literals".into())),
+                }
+            }
+            _ => {
+                let obj_val = self.eval_int(obj, ctx)?;
+                let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+                let obj_ptr = ctx.builder().build_int_to_ptr(obj_val, i64_ptr_type, "struct_ptr")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "int_to_ptr failed".into()))?;
+                let field_idx = match field {
+                    "kind" | "x" | "a" => i64_type.const_int(0, false),
+                    "value" | "y" | "b" => i64_type.const_int(1, false),
+                    _ => i64_type.const_int(0, false),
+                };
+                let field_ptr = unsafe {
+                    ctx.builder().build_in_bounds_gep(obj_ptr, &[field_idx], "field_ptr")
+                        .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "struct gep failed".into()))?
+                };
+                let loaded = ctx.builder().build_load(field_ptr, "field_val")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "load field failed".into()))?;
+                Ok(loaded.into_int_value())
+            }
+        }
+    }
+
+    fn eval_array_alloc<'a>(&mut self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+        match expr {
+            Expr::Array(elements, _) => {
+                let count = elements.len() as u64;
+                let alloc_size = i64_type.const_int(count * 8, false);
+                let malloc_fn = ctx.module().get_function("malloc")
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc not declared".into()))?;
+                let mem = ctx.builder().build_call(malloc_fn, &[alloc_size.into()], "array_malloc")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc failed".into()))?;
+                let mem_ptr = mem.try_as_basic_value().left()
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc void".into()))?;
+                let base = ctx.builder().build_pointer_cast(mem_ptr.into_pointer_value(), i64_ptr_type, "array_base")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr cast failed".into()))?;
+                for (i, elem) in elements.iter().enumerate() {
+                    let val = self.eval_int(elem, ctx)?;
+                    let idx = i64_type.const_int(i as u64, false);
+                    let elem_ptr = unsafe {
+                        ctx.builder().build_in_bounds_gep(base, &[idx], "store_ptr")
+                            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep failed".into()))?
+                    };
+                    ctx.builder().build_store(elem_ptr, val)
+                        .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "store elem failed".into()))?;
+                }
+                let result = ctx.builder().build_ptr_to_int(base, i64_type, "array_as_int")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr_to_int failed".into()))?;
+                Ok(result)
+            }
+            Expr::ArrayRepeat(val, count_expr, _) => {
+                let count_val = self.eval_int(count_expr, ctx)?;
+                let count_const = match count_expr.as_ref() {
+                    Expr::Number(n, _) => *n as u64,
+                    _ => 1,
+                };
+                let alloc_size = ctx.builder().build_int_mul(
+                    count_val, i64_type.const_int(8, false), "alloc_size"
+                ).map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "mul failed".into()))?;
+                let malloc_fn = ctx.module().get_function("malloc")
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc not declared".into()))?;
+                let mem = ctx.builder().build_call(malloc_fn, &[alloc_size.into()], "array_malloc")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc failed".into()))?;
+                let mem_ptr = mem.try_as_basic_value().left()
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc void".into()))?;
+                let base = ctx.builder().build_pointer_cast(mem_ptr.into_pointer_value(), i64_ptr_type, "array_base")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr cast failed".into()))?;
+                let fill_val = self.eval_int(val, ctx)?;
+                for i in 0..count_const.min(1024) {
+                    let idx = i64_type.const_int(i as u64, false);
+                    let elem_ptr = unsafe {
+                        ctx.builder().build_in_bounds_gep(base, &[idx], "store_ptr")
+                            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep failed".into()))?
+                    };
+                    ctx.builder().build_store(elem_ptr, fill_val)
+                        .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "store elem failed".into()))?;
+                }
+                let result = ctx.builder().build_ptr_to_int(base, i64_type, "array_as_int")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr_to_int failed".into()))?;
+                Ok(result)
+            }
+            _ => Ok(i64_type.const_int(0, false)),
+        }
+    }
+
+    fn eval_struct_init<'a>(&mut self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+        match expr {
+            Expr::StructInit(_name, fields, _) => {
+                let total_size = i64_type.const_int(fields.len() as u64 * 8, false);
+                let malloc_fn = ctx.module().get_function("malloc")
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc not declared".into()))?;
+                let mem = ctx.builder().build_call(malloc_fn, &[total_size.into()], "struct_malloc")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc failed".into()))?;
+                let mem_ptr = mem.try_as_basic_value().left()
+                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc void".into()))?;
+                let base = ctx.builder().build_pointer_cast(mem_ptr.into_pointer_value(), i64_ptr_type, "struct_base")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr cast failed".into()))?;
+                for (i, (_fname, fval)) in fields.iter().enumerate() {
+                    let val = self.eval_int(fval, ctx)?;
+                    let idx = i64_type.const_int(i as u64, false);
+                    let field_ptr = unsafe {
+                        ctx.builder().build_in_bounds_gep(base, &[idx], "field_store")
+                            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep failed".into()))?
+                    };
+                    ctx.builder().build_store(field_ptr, val)
+                        .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "store field failed".into()))?;
+                }
+                let result = ctx.builder().build_ptr_to_int(base, i64_type, "struct_as_int")
+                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr_to_int failed".into()))?;
+                Ok(result)
+            }
+            _ => Ok(i64_type.const_int(0, false)),
+        }
+    }
+
     /// Map Leo type string to LLVM type
     pub fn llvm_type<'ctx>(ty: &str, ctx: &LlvmContext<'ctx>) -> BasicTypeEnum<'ctx> {
         let context = ctx.module().get_context();
         match ty {
+            "i8" | "u8" | "char" => context.i8_type().into(),
             "i32" => context.i32_type().into(),
             "i64" => context.i64_type().into(),
             "f64" => context.f64_type().into(),
@@ -848,7 +1057,7 @@ mod tests {
 
     #[test]
     fn test_ir_builder_new() {
-        let builder = IrBuilder::new();
+        let mut builder = IrBuilder::new();
         let context = Context::create();
         let mut ctx = LlvmContext::new(&context, "test");
         assert!(builder.build(&[], &mut ctx).is_ok());

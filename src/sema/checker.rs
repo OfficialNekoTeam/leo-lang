@@ -154,7 +154,8 @@ impl Checker {
         match expr {
             Expr::Number(_, _) => Ok("i64".to_string()),
             Expr::Float(_, _) => Ok("f64".to_string()),
-            Expr::String(_, _) => Ok("string".to_string()),
+            Expr::String(_, _) => Ok("str".to_string()),
+            Expr::Char(_, _) => Ok("u8".to_string()),
             Expr::Bool(_, _) => Ok("bool".to_string()),
             Expr::Unit(_) => Ok("unit".to_string()),
             Expr::Ident(name, _) => {
@@ -171,6 +172,19 @@ impl Checker {
             Expr::Call(callee, args, _) => self.check_call(callee, args),
             Expr::Index(obj, idx, _) => self.check_index(obj, idx),
             Expr::Select(_, _, _) => Ok("unknown".to_string()),
+            Expr::Array(elements, _) => {
+                for e in elements { self.check_expr(e)?; }
+                Ok("array".to_string())
+            }
+            Expr::ArrayRepeat(val, count, _) => {
+                self.check_expr(val)?;
+                self.check_expr(count)?;
+                Ok("array".to_string())
+            }
+            Expr::StructInit(name, fields, _) => {
+                for (_, val) in fields { self.check_expr(val)?; }
+                Ok(name.clone())
+            }
             Expr::Lambda(params, body, _) => self.check_lambda(params, body),
             Expr::If(_, _, _, _) => Ok("unknown".to_string()),
             Expr::Block(stmts, _) => {

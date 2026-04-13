@@ -113,9 +113,11 @@ impl Parser {
     fn is_expr_start(&self) -> bool {
         self.peek().map_or(false, |t| match &t.token {
             Token::Number(_) | Token::Float(_) | Token::String(_) |
+            Token::Char(_) |
             Token::Identifier(_) | Token::Keyword(Keyword::True) |
             Token::Keyword(Keyword::False) |
             Token::Symbol(Symbol::LeftParen) |
+            Token::Symbol(Symbol::LeftBracket) |
             Token::Symbol(Symbol::Bang) |
             Token::Symbol(Symbol::Minus) => true,
             _ => false,
@@ -422,7 +424,6 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Parse primary: literal, ident, (expr)
     fn parse_primary(&mut self) -> LeoResult<Expr> {
         let tws = self.peek().ok_or_else(|| self.eof_err("expression"))?;
         let span = tws.span;
@@ -430,7 +431,16 @@ impl Parser {
             Token::Number(n) => { let n = *n; self.advance(); Ok(Expr::Number(n, span)) }
             Token::Float(f) => { let f = *f; self.advance(); Ok(Expr::Float(f, span)) }
             Token::String(s) => { let s = s.clone(); self.advance(); Ok(Expr::String(s, span)) }
-            Token::Identifier(n) => { let n = n.clone(); self.advance(); Ok(Expr::Ident(n, span)) }
+            Token::Char(c) => { let c = *c; self.advance(); Ok(Expr::Char(c, span)) }
+            Token::Identifier(n) => {
+                let name = n.clone();
+                let name_span = span;
+                self.advance();
+                if self.is_sym(Symbol::LeftBrace) && name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    return self.parse_struct_init(name, name_span);
+                }
+                Ok(Expr::Ident(name, name_span))
+            }
             Token::Keyword(Keyword::True) => { self.advance(); Ok(Expr::Bool(true, span)) }
             Token::Keyword(Keyword::False) => { self.advance(); Ok(Expr::Bool(false, span)) }
             Token::Symbol(Symbol::LeftParen) => {
@@ -439,8 +449,46 @@ impl Parser {
                 self.expect_sym(Symbol::RightParen)?;
                 Ok(e)
             }
+            Token::Symbol(Symbol::LeftBracket) => {
+                self.advance();
+                self.parse_array_literal(span)
+            }
             _ => Err(self.unexpected(tws)),
         }
+    }
+
+    fn parse_array_literal(&mut self, start: Span) -> LeoResult<Expr> {
+        if self.is_sym(Symbol::RightBracket) {
+            self.advance();
+            return Ok(Expr::Array(vec![], start));
+        }
+        let first = self.parse_expr()?;
+        if self.match_sym(Symbol::Semicolon) {
+            let count = self.parse_expr()?;
+            self.expect_sym(Symbol::RightBracket)?;
+            return Ok(Expr::ArrayRepeat(Box::new(first), Box::new(count), start));
+        }
+        let mut elements = vec![first];
+        while self.match_sym(Symbol::Comma) {
+            if self.is_sym(Symbol::RightBracket) { break; }
+            elements.push(self.parse_expr()?);
+        }
+        self.expect_sym(Symbol::RightBracket)?;
+        Ok(Expr::Array(elements, start))
+    }
+
+    fn parse_struct_init(&mut self, name: String, start: Span) -> LeoResult<Expr> {
+        self.expect_sym(Symbol::LeftBrace)?;
+        let mut fields = Vec::new();
+        while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
+            let fname = self.expect_ident()?;
+            self.expect_sym(Symbol::Colon)?;
+            let fval = self.parse_expr()?;
+            fields.push((fname, fval));
+            self.match_sym(Symbol::Comma);
+        }
+        self.expect_sym(Symbol::RightBrace)?;
+        Ok(Expr::StructInit(name, fields, start))
     }
 }
 

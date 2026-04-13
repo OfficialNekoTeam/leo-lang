@@ -20,7 +20,7 @@ impl Generator {
     pub fn generate(&self, stmts: &[Stmt]) -> LeoResult<String> {
         let context = Context::create();
         let mut ctx = LlvmContext::new(&context, "leo_module");
-        let builder = IrBuilder::new();
+        let mut builder = IrBuilder::new();
         builder.build(stmts, &mut ctx)?;
         let ir = ctx.print_module();
 

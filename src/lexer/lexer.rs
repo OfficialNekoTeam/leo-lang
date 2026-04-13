@@ -46,6 +46,9 @@ impl Lexer {
         if ch == '"' {
             return self.scan_string();
         }
+        if ch == '\'' {
+            return self.scan_char();
+        }
         if ch == '/' {
             return self.scan_comment();
         }
@@ -167,6 +170,49 @@ impl Lexer {
         let msg = "unterminated string".to_string();
         Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString, msg)
             .with_span(Span::new(start, end)))
+    }
+
+    fn scan_char(&mut self) -> LeoResult<TokenWithSpan> {
+        let start = self.mark_pos();
+        self.advance();
+        if self.is_eof() {
+            let end = self.mark_pos();
+            return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString,
+                "unterminated char literal".into()).with_span(Span::new(start, end)));
+        }
+        let ch = if self.current_char() == '\\' {
+            self.advance();
+            if self.is_eof() {
+                let end = self.mark_pos();
+                return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString,
+                    "unterminated char escape".into()).with_span(Span::new(start, end)));
+            }
+            let escaped = match self.current_char() {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '\\' => '\\',
+                '\'' => '\'',
+                '0' => '\0',
+                c => c,
+            };
+            escaped
+        } else {
+            let ch = self.current_char();
+            self.advance();
+            ch
+        };
+        if self.is_eof() || self.current_char() != '\'' {
+            let end = self.mark_pos();
+            return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnexpectedChar,
+                "expected closing '".into()).with_span(Span::new(start, end)));
+        }
+        self.advance();
+        let end = self.mark_pos();
+        Ok(TokenWithSpan {
+            token: Token::Char(ch),
+            span: Span::new(start, end),
+        })
     }
 
     fn scan_comment(&mut self) -> LeoResult<TokenWithSpan> {
