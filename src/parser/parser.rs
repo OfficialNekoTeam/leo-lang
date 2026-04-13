@@ -372,8 +372,8 @@ impl Parser {
     /// Map current token to binary operator + precedence
     fn peek_binop(&self) -> Option<(BinOp, u8)> {
         match &self.peek()?.token {
-            Token::Symbol(Symbol::Pipe) => Some((BinOp::Or, 1)),
-            Token::Symbol(Symbol::Ampersand) => Some((BinOp::And, 2)),
+            Token::Symbol(Symbol::Pipe) | Token::Symbol(Symbol::DoublePipe) => Some((BinOp::Or, 1)),
+            Token::Symbol(Symbol::Ampersand) | Token::Symbol(Symbol::DoubleAmpersand) => Some((BinOp::And, 2)),
             Token::Symbol(Symbol::DoubleEqual) => Some((BinOp::Eq, 3)),
             Token::Symbol(Symbol::BangEqual) => Some((BinOp::Ne, 3)),
             Token::Symbol(Symbol::Less) => Some((BinOp::Lt, 4)),
