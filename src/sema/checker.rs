@@ -9,12 +9,13 @@ use std::mem;
 pub struct Checker {
     scope: Scope,
     functions: HashSet<String>,
+    constants: HashSet<String>,
 }
 
 impl Checker {
     /// Create new checker with root scope
     pub fn new() -> Self {
-        Self { scope: Scope::new(), functions: HashSet::new() }
+        Self { scope: Scope::new(), functions: HashSet::new(), constants: HashSet::new() }
     }
 
     /// Check list of statements
@@ -44,6 +45,9 @@ impl Checker {
             Stmt::Import(_, _, _) | Stmt::FromImport(_, _, _) => {}
             Stmt::Module(_, body, _) => { self.check(body)?; }
             Stmt::Break(_, _) | Stmt::Continue(_) => {}
+            Stmt::Const(name, _, _, _) => {
+                self.constants.insert(name.clone());
+            }
             Stmt::Trait(_, _, _) | Stmt::Impl(_, _, _, _) => {}
             Stmt::Pub(inner) => { self.check_stmt(inner)?; }
             Stmt::Enum(_, variants, _) => self.check_enum(variants)?,
@@ -145,6 +149,9 @@ impl Checker {
             Expr::Bool(_, _) => Ok("bool".to_string()),
             Expr::Unit(_) => Ok("unit".to_string()),
             Expr::Ident(name, _) => {
+                if self.constants.contains(name) {
+                    return Ok("i64".to_string());
+                }
                 self.scope.resolve(name)
                     .map(|e| e.ty.clone())
                     .ok_or_else(|| LeoError::new(ErrorKind::Semantic, ErrorCode::SemaUndefinedVariable,

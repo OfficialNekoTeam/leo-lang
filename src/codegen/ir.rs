@@ -38,6 +38,9 @@ impl IrBuilder {
             Stmt::AsyncFunction(name, params, ret, body, _) => {
                 self.build_fn(name, params, ret, body, ctx)?;
             }
+            Stmt::Const(name, ty, expr, _span) => {
+                self.build_const(name, ty, expr, ctx)?;
+            }
             Stmt::Struct(name, fields, _) => {
                 let struct_type = ctx.module().get_context().opaque_struct_type(name);
                 let _ = struct_type;
@@ -138,7 +141,34 @@ impl IrBuilder {
         Ok(())
     }
 
-    /// Build let binding: alloca on stack, store initial value
+    /// Build const: treated as a global constant (evaluated at compile time)
+    fn build_const(&self, name: &str, ty: &str, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
+        let context = ctx.module().get_context();
+        let llvm_type = Self::llvm_type(ty, ctx);
+        match expr {
+            Expr::Number(n, _) => {
+                let gv = ctx.module_mut().add_global(llvm_type, Some(AddressSpace::default()), name);
+                gv.set_initializer(&context.i64_type().const_int(*n as u64, false));
+                gv.set_constant(true);
+                gv.set_linkage(inkwell::module::Linkage::Private);
+            }
+            Expr::Bool(b, _) => {
+                let gv = ctx.module_mut().add_global(llvm_type, Some(AddressSpace::default()), name);
+                gv.set_initializer(&context.i64_type().const_int(*b as u64, false));
+                gv.set_constant(true);
+                gv.set_linkage(inkwell::module::Linkage::Private);
+            }
+            _ => {
+                // Fallback: evaluate and store
+                let val = self.eval_int(expr, ctx)?;
+                let gv = ctx.module_mut().add_global(llvm_type, Some(AddressSpace::default()), name);
+                gv.set_initializer(&val);
+                gv.set_constant(true);
+                gv.set_linkage(inkwell::module::Linkage::Private);
+            }
+        }
+        Ok(())
+    }
     fn build_let(&self, name: &str, ty: &Option<String>, init: &Option<Expr>, ctx: &mut LlvmContext) -> LeoResult<()> {
         let type_str = ty.as_deref().unwrap_or("i64");
         let llvm_type = Self::llvm_type(type_str, ctx);
@@ -273,35 +303,41 @@ impl IrBuilder {
             .map(|_| ())
             .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "branch failed".into()))
     }
-    fn eval_and_emit(&self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
-        match expr {
-            Expr::String(s, _) => self.emit_puts(s, ctx),
-            Expr::Ident(name, _) => {
-                let ptr = ctx.get_variable(name)
-                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined variable: {}", name)))?;
-                let val = ctx.builder().build_load(ptr, name)
-                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("load failed for {}", name)))?;
-                self.emit_print_int(val.into_int_value(), ctx);
-                Ok(())
-            }
-            _ => {
-                let val = self.eval_int(expr, ctx)?;
-                self.emit_print_int(val, ctx);
-                Ok(())
-            }
+     fn eval_and_emit(&self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
+         match expr {
+             Expr::String(s, _) => self.emit_puts(s, ctx),
+             Expr::Ident(name, _) => {
+                 let val = self.load_ident(name, ctx)?;
+                 self.emit_print_int(val, ctx);
+                 Ok(())
+             }
+             _ => {
+                 let val = self.eval_int(expr, ctx)?;
+                 self.emit_print_int(val, ctx);
+                 Ok(())
+             }
+         }
+     }
+
+    /// Load identifier value: try local variable, then global constant
+    fn load_ident<'a>(&self, name: &str, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
+        if let Some(ptr) = ctx.get_variable(name) {
+            ctx.builder().build_load(ptr, name)
+                .map(|v| v.into_int_value())
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("load failed for {}", name)))
+        } else if let Some(gv) = ctx.module().get_global(name) {
+            let val = ctx.builder().build_load(gv.as_pointer_value(), name)
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("load const {} failed", name)))?;
+            Ok(val.into_int_value())
+        } else {
+            Err(LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined variable: {}", name)))
         }
     }
 
     /// Evaluate expression to an LLVM IntValue (handles ident load, literals, binary, unary)
     fn eval_expr_to_value<'a>(&self, expr: &Expr, ctx: &mut LlvmContext<'a>) -> LeoResult<inkwell::values::IntValue<'a>> {
         match expr {
-            Expr::Ident(name, _) => {
-                let ptr = ctx.get_variable(name)
-                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined variable: {}", name)))?;
-                ctx.builder().build_load(ptr, name)
-                    .map(|v| v.into_int_value())
-                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("load failed for {}", name)))
-            }
+            Expr::Ident(name, _) => self.load_ident(name, ctx),
             _ => self.eval_int(expr, ctx),
         }
     }
@@ -311,13 +347,7 @@ impl IrBuilder {
         match expr {
             Expr::Number(n, _) => Ok(ctx.module().get_context().i64_type().const_int(*n as u64, false)),
             Expr::Bool(b, _) => Ok(ctx.module().get_context().i64_type().const_int(*b as u64, false)),
-            Expr::Ident(name, _) => {
-                let ptr = ctx.get_variable(name)
-                    .ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("undefined variable: {}", name)))?;
-                ctx.builder().build_load(ptr, name)
-                    .map(|v| v.into_int_value())
-                    .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, format!("load failed for {}", name)))
-            }
+            Expr::Ident(name, _) => self.load_ident(name, ctx),
             Expr::Binary(op, left, right, _) => {
                 let lv = self.eval_int(left, ctx)?;
                 let rv = self.eval_int(right, ctx)?;

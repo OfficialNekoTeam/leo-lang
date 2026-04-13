@@ -23,6 +23,7 @@ pub enum Stmt {
     Trait(String, Vec<(String, Vec<Stmt>)>, Span),
     Impl(String, Option<String>, Vec<Stmt>, Span),
     Pub(Box<Stmt>),
+    Const(String, String, Expr, Span),
 }
 
 #[cfg(test)]

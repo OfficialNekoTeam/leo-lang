@@ -147,6 +147,7 @@ impl Parser {
             Token::Keyword(Keyword::For) => self.parse_for(),
             Token::Keyword(Keyword::Import) => self.parse_import(),
             Token::Keyword(Keyword::Struct) => self.parse_struct(),
+            Token::Keyword(Keyword::Const) => self.parse_const(),
             Token::Keyword(Keyword::Pub) => {
                 self.advance();
                 Ok(Stmt::Pub(Box::new(self.parse_stmt()?)))
@@ -246,6 +247,19 @@ impl Parser {
         let expr = self.parse_expr()?;
         self.skip_semi();
         Ok(Stmt::Assign(name, expr))
+    }
+
+    /// Parse const: const NAME: Type = expr
+    fn parse_const(&mut self) -> LeoResult<Stmt> {
+        let span = self.cur_span();
+        self.advance();
+        let name = self.expect_ident()?;
+        self.expect_sym(Symbol::Colon)?;
+        let ty = self.expect_ident()?;
+        self.expect_sym(Symbol::Equal)?;
+        let expr = self.parse_expr()?;
+        self.skip_semi();
+        Ok(Stmt::Const(name, ty, expr, self.merge(span, self.prev_span())))
     }
 
     /// Parse if: if expr { stmts } [else { stmts }] or else if chain

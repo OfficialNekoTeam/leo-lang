@@ -291,6 +291,7 @@ impl Lexer {
             "false" => Some(Keyword::False),
             "break" => Some(Keyword::Break),
             "continue" => Some(Keyword::Continue),
+            "const" => Some(Keyword::Const),
             _ => None,
         }
     }
