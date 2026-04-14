@@ -8,6 +8,7 @@ use std::mem;
 pub struct Checker {
     scope: Scope,
     functions: HashSet<String>,
+    fn_params: HashMap<String, usize>,
     constants: HashSet<String>,
     enum_variants: HashMap<String, (String, u32)>,
 }
@@ -38,6 +39,7 @@ impl Checker {
         Self {
             scope: Scope::new(),
             functions,
+            fn_params: HashMap::new(),
             constants: HashSet::new(),
             enum_variants: HashMap::new(),
         }
@@ -105,6 +107,7 @@ impl Checker {
             Stmt::Function(name, params, ret, body, _)
             | Stmt::AsyncFunction(name, params, ret, body, _) => {
                 self.functions.insert(name.clone());
+                self.fn_params.insert(name.clone(), params.len());
                 self.check_fn(name, params, ret, body)?;
             }
             Stmt::Struct(name, fields, _) => self.check_struct(name, fields)?,
@@ -122,6 +125,7 @@ impl Checker {
                     if let Stmt::Function(name, params, ret, body, _) = method {
                         let mangled = format!("{}_{}", struct_name, name);
                         self.functions.insert(mangled.clone());
+                        self.fn_params.insert(mangled.clone(), params.len());
                         self.check_fn(&mangled, params, ret, body)?;
                     }
                 }
@@ -318,6 +322,13 @@ impl Checker {
         let rt = self.check_expr(right)?;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                if lt == "bool" || rt == "bool" {
+                    return Err(LeoError::new(
+                        ErrorKind::Semantic,
+                        ErrorCode::SemaTypeMismatch,
+                        "arithmetic on bool is not allowed".into(),
+                    ));
+                }
                 if lt != rt && lt != "unknown" && rt != "unknown" {
                     return Err(LeoError::new(
                         ErrorKind::Semantic,
@@ -378,13 +389,26 @@ impl Checker {
     fn check_call(&mut self, callee: &Expr, args: &[Expr]) -> LeoResult<String> {
         match callee {
             Expr::Ident(name, _) => {
-                // Allow known functions without scope lookup
                 if !self.functions.contains(name) && self.scope.resolve(name).is_none() {
                     return Err(LeoError::new(
                         ErrorKind::Semantic,
                         ErrorCode::SemaUndefinedVariable,
                         format!("undefined function or variable: {}", name),
                     ));
+                }
+                if let Some(&expected) = self.fn_params.get(name) {
+                    if args.len() != expected {
+                        return Err(LeoError::new(
+                            ErrorKind::Semantic,
+                            ErrorCode::SemaTypeMismatch,
+                            format!(
+                                "function {} expects {} args, got {}",
+                                name,
+                                expected,
+                                args.len()
+                            ),
+                        ));
+                    }
                 }
             }
             _ => {

@@ -36,7 +36,7 @@ impl Lexer {
     fn next_token(&mut self) -> LeoResult<TokenWithSpan> {
         let ch = self.current_char();
         let start = self.mark_pos();
-        
+
         if ch.is_ascii_alphabetic() || ch == '_' {
             return self.scan_identifier();
         }
@@ -52,7 +52,7 @@ impl Lexer {
         if ch == '/' {
             return self.scan_comment();
         }
-        
+
         let symbol = self.scan_symbol();
         if let Some(s) = symbol {
             let end = self.mark_pos();
@@ -61,11 +61,13 @@ impl Lexer {
                 span: Span::new(start, end),
             });
         }
-        
+
         let end = self.mark_pos();
         let msg = format!("unexpected character: {}", ch);
-        Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnexpectedChar, msg)
-            .with_span(Span::new(start, end)))
+        Err(
+            LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnexpectedChar, msg)
+                .with_span(Span::new(start, end)),
+        )
     }
 
     fn scan_identifier(&mut self) -> LeoResult<TokenWithSpan> {
@@ -81,13 +83,13 @@ impl Lexer {
             }
         }
         let end = self.mark_pos();
-        
+
         let token = if let Some(kw) = self.keyword(&buf) {
             Token::Keyword(kw)
         } else {
             Token::Identifier(buf)
         };
-        
+
         Ok(TokenWithSpan {
             token,
             span: Span::new(start, end),
@@ -98,7 +100,7 @@ impl Lexer {
         let start = self.mark_pos();
         let mut buf = String::new();
         let mut is_float = false;
-        
+
         while !self.is_eof() {
             let ch = self.current_char();
             if ch.is_ascii_digit() {
@@ -118,13 +120,25 @@ impl Lexer {
             }
         }
         let end = self.mark_pos();
-        
+
         let token = if is_float {
-            Token::Float(buf.parse().unwrap_or(0.0))
+            Token::Float(buf.parse().map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::LexerInvalidNumber,
+                    format!("invalid float literal: {}", buf),
+                )
+            })?)
         } else {
-            Token::Number(buf.parse().unwrap_or(0))
+            Token::Number(buf.parse().map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::LexerInvalidNumber,
+                    format!("integer literal too large: {}", buf),
+                )
+            })?)
         };
-        
+
         Ok(TokenWithSpan {
             token,
             span: Span::new(start, end),
@@ -135,7 +149,7 @@ impl Lexer {
         let start = self.mark_pos();
         self.advance(); // skip opening "
         let mut buf = String::new();
-        
+
         while !self.is_eof() {
             let ch = self.current_char();
             if ch == '"' {
@@ -165,11 +179,13 @@ impl Lexer {
                 self.advance();
             }
         }
-        
+
         let end = self.mark_pos();
         let msg = "unterminated string".to_string();
-        Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString, msg)
-            .with_span(Span::new(start, end)))
+        Err(
+            LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString, msg)
+                .with_span(Span::new(start, end)),
+        )
     }
 
     fn scan_char(&mut self) -> LeoResult<TokenWithSpan> {
@@ -177,15 +193,23 @@ impl Lexer {
         self.advance();
         if self.is_eof() {
             let end = self.mark_pos();
-            return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString,
-                "unterminated char literal".into()).with_span(Span::new(start, end)));
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::LexerUnterminatedString,
+                "unterminated char literal".into(),
+            )
+            .with_span(Span::new(start, end)));
         }
         let ch = if self.current_char() == '\\' {
             self.advance();
             if self.is_eof() {
                 let end = self.mark_pos();
-                return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString,
-                    "unterminated char escape".into()).with_span(Span::new(start, end)));
+                return Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::LexerUnterminatedString,
+                    "unterminated char escape".into(),
+                )
+                .with_span(Span::new(start, end)));
             }
             let escaped = match self.current_char() {
                 'n' => '\n',
@@ -204,8 +228,12 @@ impl Lexer {
         };
         if self.is_eof() || self.current_char() != '\'' {
             let end = self.mark_pos();
-            return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnexpectedChar,
-                "expected closing '".into()).with_span(Span::new(start, end)));
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::LexerUnexpectedChar,
+                "expected closing '".into(),
+            )
+            .with_span(Span::new(start, end)));
         }
         self.advance();
         let end = self.mark_pos();
@@ -218,7 +246,7 @@ impl Lexer {
     fn scan_comment(&mut self) -> LeoResult<TokenWithSpan> {
         let start = self.mark_pos();
         self.advance(); // skip /
-        
+
         if self.current_char() == '/' {
             self.advance();
             let mut buf = String::new();
@@ -232,7 +260,7 @@ impl Lexer {
                 span: Span::new(start, end),
             });
         }
-        
+
         if self.current_char() == '*' {
             self.advance();
             let mut buf = String::new();
@@ -240,8 +268,12 @@ impl Lexer {
                 if self.is_eof() {
                     let end = self.mark_pos();
                     let msg = "unterminated block comment".to_string();
-                    return Err(LeoError::new(ErrorKind::Syntax, ErrorCode::LexerUnterminatedString, msg)
-                        .with_span(Span::new(start, end)));
+                    return Err(LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::LexerUnterminatedString,
+                        msg,
+                    )
+                    .with_span(Span::new(start, end)));
                 }
                 if self.current_char() == '*' && self.peek_char() == '/' {
                     self.advance();
@@ -256,7 +288,7 @@ impl Lexer {
                 self.advance();
             }
         }
-        
+
         let end = self.mark_pos();
         Ok(TokenWithSpan {
             token: Token::Symbol(Symbol::Slash),
@@ -267,45 +299,171 @@ impl Lexer {
     fn scan_symbol(&mut self) -> Option<Symbol> {
         let ch = self.current_char();
         let next = self.peek_char();
-        
+
         match (ch, next) {
-            ('{', _) => { self.advance(); Some(Symbol::LeftBrace) },
-            ('}', _) => { self.advance(); Some(Symbol::RightBrace) },
-            ('(', _) => { self.advance(); Some(Symbol::LeftParen) },
-            (')', _) => { self.advance(); Some(Symbol::RightParen) },
-            ('[', _) => { self.advance(); Some(Symbol::LeftBracket) },
-            (']', _) => { self.advance(); Some(Symbol::RightBracket) },
-            (',', _) => { self.advance(); Some(Symbol::Comma) },
-            (':', ':') => { self.advance(); self.advance(); Some(Symbol::DoubleColon) },
-            (':', _) => { self.advance(); Some(Symbol::Colon) },
-            (';', _) => { self.advance(); Some(Symbol::Semicolon) },
-            ('+', '=') => { self.advance(); self.advance(); Some(Symbol::PlusEqual) },
-            ('+', _) => { self.advance(); Some(Symbol::Plus) },
-            ('-', '=') => { self.advance(); self.advance(); Some(Symbol::MinusEqual) },
-            ('-', '>') => { self.advance(); self.advance(); Some(Symbol::Arrow) },
-            ('-', _) => { self.advance(); Some(Symbol::Minus) },
-            ('*', '=') => { self.advance(); self.advance(); Some(Symbol::StarEqual) },
-            ('*', _) => { self.advance(); Some(Symbol::Star) },
-            ('/', '=') => { self.advance(); self.advance(); Some(Symbol::SlashEqual) },
-            ('/', _) => { self.advance(); Some(Symbol::Slash) },
-            ('%', _) => { self.advance(); Some(Symbol::Percent) },
-            ('=', '=') => { self.advance(); self.advance(); Some(Symbol::DoubleEqual) },
-            ('=', '>') => { self.advance(); self.advance(); Some(Symbol::FatArrow) },
-            ('=', _) => { self.advance(); Some(Symbol::Equal) },
-            ('!', '=') => { self.advance(); self.advance(); Some(Symbol::BangEqual) },
-            ('!', _) => { self.advance(); Some(Symbol::Bang) },
-            ('>', '=') => { self.advance(); self.advance(); Some(Symbol::GreaterEqual) },
-            ('>', _) => { self.advance(); Some(Symbol::Greater) },
-            ('<', '=') => { self.advance(); self.advance(); Some(Symbol::LessEqual) },
-            ('<', _) => { self.advance(); Some(Symbol::Less) },
-            ('&', '&') => { self.advance(); self.advance(); Some(Symbol::DoubleAmpersand) },
-            ('&', _) => { self.advance(); Some(Symbol::Ampersand) },
-            ('|', '|') => { self.advance(); self.advance(); Some(Symbol::DoublePipe) },
-            ('|', _) => { self.advance(); Some(Symbol::Pipe) },
-            ('.', '.') => { self.advance(); self.advance(); Some(Symbol::DoubleDot) },
-            ('.', _) => { self.advance(); Some(Symbol::Dot) },
-            ('?', '?') => { self.advance(); self.advance(); Some(Symbol::QuestionQuestion) },
-            ('?', _) => { self.advance(); Some(Symbol::Question) },
+            ('{', _) => {
+                self.advance();
+                Some(Symbol::LeftBrace)
+            }
+            ('}', _) => {
+                self.advance();
+                Some(Symbol::RightBrace)
+            }
+            ('(', _) => {
+                self.advance();
+                Some(Symbol::LeftParen)
+            }
+            (')', _) => {
+                self.advance();
+                Some(Symbol::RightParen)
+            }
+            ('[', _) => {
+                self.advance();
+                Some(Symbol::LeftBracket)
+            }
+            (']', _) => {
+                self.advance();
+                Some(Symbol::RightBracket)
+            }
+            (',', _) => {
+                self.advance();
+                Some(Symbol::Comma)
+            }
+            (':', ':') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::DoubleColon)
+            }
+            (':', _) => {
+                self.advance();
+                Some(Symbol::Colon)
+            }
+            (';', _) => {
+                self.advance();
+                Some(Symbol::Semicolon)
+            }
+            ('+', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::PlusEqual)
+            }
+            ('+', _) => {
+                self.advance();
+                Some(Symbol::Plus)
+            }
+            ('-', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::MinusEqual)
+            }
+            ('-', '>') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::Arrow)
+            }
+            ('-', _) => {
+                self.advance();
+                Some(Symbol::Minus)
+            }
+            ('*', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::StarEqual)
+            }
+            ('*', _) => {
+                self.advance();
+                Some(Symbol::Star)
+            }
+            ('/', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::SlashEqual)
+            }
+            ('/', _) => {
+                self.advance();
+                Some(Symbol::Slash)
+            }
+            ('%', _) => {
+                self.advance();
+                Some(Symbol::Percent)
+            }
+            ('=', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::DoubleEqual)
+            }
+            ('=', '>') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::FatArrow)
+            }
+            ('=', _) => {
+                self.advance();
+                Some(Symbol::Equal)
+            }
+            ('!', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::BangEqual)
+            }
+            ('!', _) => {
+                self.advance();
+                Some(Symbol::Bang)
+            }
+            ('>', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::GreaterEqual)
+            }
+            ('>', _) => {
+                self.advance();
+                Some(Symbol::Greater)
+            }
+            ('<', '=') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::LessEqual)
+            }
+            ('<', _) => {
+                self.advance();
+                Some(Symbol::Less)
+            }
+            ('&', '&') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::DoubleAmpersand)
+            }
+            ('&', _) => {
+                self.advance();
+                Some(Symbol::Ampersand)
+            }
+            ('|', '|') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::DoublePipe)
+            }
+            ('|', _) => {
+                self.advance();
+                Some(Symbol::Pipe)
+            }
+            ('.', '.') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::DoubleDot)
+            }
+            ('.', _) => {
+                self.advance();
+                Some(Symbol::Dot)
+            }
+            ('?', '?') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::QuestionQuestion)
+            }
+            ('?', _) => {
+                self.advance();
+                Some(Symbol::Question)
+            }
             _ => None,
         }
     }

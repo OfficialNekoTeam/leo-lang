@@ -764,7 +764,10 @@ impl IrBuilder {
                 .and_then(|v| ctx.builder().build_int_z_extend(v, i64_type, "ge.ext")),
             BinOp::And => ctx.builder().build_and(lv, rv, "and"),
             BinOp::Or => ctx.builder().build_or(lv, rv, "or"),
-            _ => return Ok(lv),
+            BinOp::BitAnd => ctx.builder().build_and(lv, rv, "band"),
+            BinOp::BitOr => ctx.builder().build_or(lv, rv, "bor"),
+            BinOp::Shl => ctx.builder().build_left_shift(lv, rv, "shl"),
+            BinOp::Shr => ctx.builder().build_right_shift(lv, rv, true, "shr"),
         }
         .map_err(|_| {
             LeoError::new(

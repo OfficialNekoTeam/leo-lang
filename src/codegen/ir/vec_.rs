@@ -561,6 +561,15 @@ impl IrBuilder {
         if args.is_empty() {
             return Ok(ctx.module().get_context().i64_type().const_int(0, false));
         }
+        if let Expr::String(s, _) = &args[0] {
+            if s.contains("..") || s.starts_with('/') {
+                return Err(LeoError::new(
+                    ErrorKind::Semantic,
+                    ErrorCode::SemaTypeMismatch,
+                    format!("file_read: path traversal blocked: {}", s),
+                ));
+            }
+        }
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();
         let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
@@ -725,6 +734,15 @@ impl IrBuilder {
     ) -> LeoResult<inkwell::values::IntValue<'a>> {
         if args.len() < 2 {
             return Ok(ctx.module().get_context().i64_type().const_int(0, false));
+        }
+        if let Expr::String(s, _) = &args[0] {
+            if s.contains("..") || s.starts_with('/') {
+                return Err(LeoError::new(
+                    ErrorKind::Semantic,
+                    ErrorCode::SemaTypeMismatch,
+                    format!("file_write: path traversal blocked: {}", s),
+                ));
+            }
         }
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();

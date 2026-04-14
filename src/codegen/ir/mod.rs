@@ -27,6 +27,7 @@ pub struct IrBuilder {
     pub(super) struct_field_types: HashMap<String, Vec<String>>,
     pub(super) var_types: HashMap<String, String>,
     pub(super) methods: HashMap<(String, String), String>,
+    pub(super) enum_payload_types: HashMap<String, Vec<String>>,
 }
 
 impl IrBuilder {
@@ -39,6 +40,7 @@ impl IrBuilder {
             struct_field_types: HashMap::new(),
             var_types: HashMap::new(),
             methods: HashMap::new(),
+            enum_payload_types: HashMap::new(),
         }
     }
 
@@ -50,6 +52,7 @@ impl IrBuilder {
         self.struct_field_types.clear();
         self.var_types.clear();
         self.methods.clear();
+        self.enum_payload_types.clear();
         self.declare_c_runtime(ctx);
         for stmt in stmts {
             self.build_stmt(stmt, ctx)?;

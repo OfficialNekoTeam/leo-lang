@@ -129,6 +129,20 @@ impl IrBuilder {
                 enum_struct.set_body(&[i32_type.into(), payload_type], false);
                 let variant_names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
                 ctx.register_enum(name.clone(), variant_names);
+                for (vname, payload) in variants {
+                    let qualified = format!("{}::{}", name, vname);
+                    let types: Vec<String> = payload
+                        .iter()
+                        .map(|e| {
+                            if let Expr::Ident(t, _) = e {
+                                t.clone()
+                            } else {
+                                "i64".to_string()
+                            }
+                        })
+                        .collect();
+                    self.enum_payload_types.insert(qualified, types);
+                }
             }
             Stmt::Impl(struct_name, _trait, methods, _) => {
                 for method in methods {
@@ -295,8 +309,9 @@ impl IrBuilder {
             BinOp::Add => Some(l.wrapping_add(r)),
             BinOp::Sub => Some(l.wrapping_sub(r)),
             BinOp::Mul => Some(l.wrapping_mul(r)),
-            BinOp::Div if r != 0 => Some(l / r),
-            BinOp::Mod if r != 0 => Some(l % r),
+            BinOp::Div | BinOp::Mod if r == 0 => None,
+            BinOp::Div => Some(l / r),
+            BinOp::Mod => Some(l % r),
             BinOp::Eq => Some(if l == r { 1 } else { 0 }),
             BinOp::Ne => Some(if l != r { 1 } else { 0 }),
             BinOp::Lt => Some(if l < r { 1 } else { 0 }),

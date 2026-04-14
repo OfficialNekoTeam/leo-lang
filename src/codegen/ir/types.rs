@@ -768,7 +768,17 @@ impl IrBuilder {
                                     "cast payload for destr failed".into(),
                                 )
                             })?;
-                        return self.bind_payload_fields(bindings, payload_i64, ctx);
+                        let payload_types = self
+                            .enum_payload_types
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default();
+                        return self.bind_payload_fields(
+                            bindings,
+                            payload_i64,
+                            ctx,
+                            &payload_types,
+                        );
                     }
                 }
             }
@@ -818,6 +828,7 @@ impl IrBuilder {
         bindings: &[Expr],
         payload_i64: inkwell::values::PointerValue<'a>,
         ctx: &mut LlvmContext<'a>,
+        payload_types: &[String],
     ) -> LeoResult<()> {
         let i64_type = ctx.module().get_context().i64_type();
         for (j, binding) in bindings.iter().enumerate() {
@@ -862,6 +873,12 @@ impl IrBuilder {
                     )
                 })?;
                 ctx.register_variable(var_name.clone(), var_ptr);
+                if let Some(field_type) = payload_types.get(j) {
+                    if field_type == "str" || field_type == "string" {
+                        self.string_vars.insert(var_name.clone());
+                        ctx.register_type(var_name.clone(), crate::llvm::context::LeoType::Str);
+                    }
+                }
             }
         }
         Ok(())
