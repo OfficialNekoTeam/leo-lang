@@ -52,6 +52,39 @@ impl IrBuilder {
         }
         let str_ptr = self.eval_string_arg(&args[0], ctx)?;
         let idx = self.eval_int(&args[1], ctx)?;
+        self.emit_nonneg_check(idx, "runtime error: negative string index\n", ctx)?;
+        let strlen_fn = ctx.module().get_function("strlen").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strlen not declared".into(),
+            )
+        })?;
+        let slen = ctx
+            .builder()
+            .build_call(strlen_fn, &[str_ptr.into()], "slen")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen call failed".into(),
+                )
+            })?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen returned void".into(),
+                )
+            })?;
+        self.emit_bounds_check(
+            idx,
+            slen.into_int_value(),
+            "runtime error: string index out of bounds\n",
+            ctx,
+        )?;
         let context = ctx.module().get_context();
         let i8_type = context.i8_type();
         let i8_ptr = i8_type.ptr_type(AddressSpace::default());
@@ -116,6 +149,94 @@ impl IrBuilder {
         let i64_type = context.i64_type();
         let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
 
+        // a) start >= 0
+        self.emit_nonneg_check(start, "runtime error: str_slice start < 0\n", ctx)?;
+
+        // b) end <= strlen(s)
+        let strlen_fn = ctx.module().get_function("strlen").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strlen not found".into(),
+            )
+        })?;
+        let str_len_call = ctx
+            .builder()
+            .build_call(strlen_fn, &[str_ptr.into()], "slice_strlen")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen call failed".into(),
+                )
+            })?;
+        let str_len_val = str_len_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen void".into(),
+                )
+            })?
+            .into_int_value();
+        let str_len_int = ctx
+            .builder()
+            .build_int_cast(str_len_val, i64_type, "slen_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "int cast failed".into(),
+                )
+            })?;
+        self.emit_bounds_check(
+            end,
+            str_len_int,
+            "runtime error: str_slice end > string length\n",
+            ctx,
+        )?;
+
+        // c) start <= end
+        let start_gt_end = ctx
+            .builder()
+            .build_int_compare(IntPredicate::SGT, start, end, "start_gt_end")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "compare failed".into(),
+                )
+            })?;
+        let function = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function".into(),
+                )
+            })?;
+        let fail_block = context.append_basic_block(function, "slice_range_fail");
+        let ok_block = context.append_basic_block(function, "slice_range_ok");
+        ctx.builder()
+            .build_conditional_branch(start_gt_end, fail_block, ok_block)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(fail_block);
+        self.emit_puts("runtime error: str_slice start > end\n", ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(ok_block);
+
         // len = end - start + 1 (for null terminator)
         let one = i64_type.const_int(1, false);
         let len = ctx
@@ -164,9 +285,22 @@ impl IrBuilder {
                 "malloc void".into(),
             )
         })?;
+        let dest_pval = dest_ptr.into_pointer_value();
+        // NULL check: abort if slice malloc failed
+        let dest_i64 = ctx
+            .builder()
+            .build_ptr_to_int(dest_pval, i64_type, "dest_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(dest_i64, "runtime error: out of memory\n", ctx)?;
         let dest_i8 = ctx
             .builder()
-            .build_pointer_cast(dest_ptr.into_pointer_value(), i8_ptr_type, "dest_i8")
+            .build_pointer_cast(dest_pval, i8_ptr_type, "dest_i8")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -370,9 +504,22 @@ impl IrBuilder {
                 "malloc void".into(),
             )
         })?;
+        let dest_pval = dest_ptr.into_pointer_value();
+        // NULL check: abort if concat malloc failed
+        let dest_i64 = ctx
+            .builder()
+            .build_ptr_to_int(dest_pval, i64_type, "dest_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(dest_i64, "runtime error: out of memory\n", ctx)?;
         let dest_i8 = ctx
             .builder()
-            .build_pointer_cast(dest_ptr.into_pointer_value(), i8_ptr_type, "dest_i8")
+            .build_pointer_cast(dest_pval, i8_ptr_type, "dest_i8")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -426,10 +573,42 @@ impl IrBuilder {
     ) -> LeoResult<inkwell::values::IntValue<'a>> {
         let str_ptr = self.eval_string_arg(obj, ctx)?;
         let idx_val = self.eval_int(idx, ctx)?;
+        self.emit_nonneg_check(idx_val, "runtime error: negative string index\n", ctx)?;
+        let strlen_fn = ctx.module().get_function("strlen").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strlen not declared".into(),
+            )
+        })?;
+        let slen = ctx
+            .builder()
+            .build_call(strlen_fn, &[str_ptr.into()], "slen")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen call failed".into(),
+                )
+            })?
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen returned void".into(),
+                )
+            })?;
+        self.emit_bounds_check(
+            idx_val,
+            slen.into_int_value(),
+            "runtime error: string index out of bounds\n",
+            ctx,
+        )?;
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();
         let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
-
         let casted = ctx
             .builder()
             .build_pointer_cast(str_ptr, i8_ptr_type, "str_i8ptr")
@@ -506,23 +685,32 @@ impl IrBuilder {
                     "malloc char_to_str failed".into(),
                 )
             })?;
+        let buf_raw = buf_alloc
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "malloc returned void".into(),
+                )
+            })?
+            .into_pointer_value();
+        // NULL check: abort if char_to_str malloc failed
+        let buf_i64 = ctx
+            .builder()
+            .build_ptr_to_int(buf_raw, i64_type, "c2s_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(buf_i64, "runtime error: out of memory\n", ctx)?;
         let buf_ptr = ctx
             .builder()
-            .build_pointer_cast(
-                buf_alloc
-                    .try_as_basic_value()
-                    .left()
-                    .ok_or_else(|| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "malloc returned void".into(),
-                        )
-                    })?
-                    .into_pointer_value(),
-                i8_ptr,
-                "c2s_buf",
-            )
+            .build_pointer_cast(buf_raw, i8_ptr, "c2s_buf")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -812,23 +1000,32 @@ impl IrBuilder {
                     "malloc to_string failed".into(),
                 )
             })?;
+        let buf_raw = buf_alloc
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "malloc returned void".into(),
+                )
+            })?
+            .into_pointer_value();
+        // NULL check: abort if to_string malloc failed
+        let buf_i64 = ctx
+            .builder()
+            .build_ptr_to_int(buf_raw, i64_type, "ts_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(buf_i64, "runtime error: out of memory\n", ctx)?;
         let buf_ptr = ctx
             .builder()
-            .build_pointer_cast(
-                buf_alloc
-                    .try_as_basic_value()
-                    .left()
-                    .ok_or_else(|| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "malloc returned void".into(),
-                        )
-                    })?
-                    .into_pointer_value(),
-                i8_ptr,
-                "ts_buf",
-            )
+            .build_pointer_cast(buf_raw, i8_ptr, "ts_buf")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,

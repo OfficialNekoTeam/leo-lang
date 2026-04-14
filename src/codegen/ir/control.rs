@@ -93,7 +93,11 @@ impl IrBuilder {
         ctx: &mut LlvmContext,
     ) -> LeoResult<()> {
         let type_str = ty.as_deref().unwrap_or("i64");
-        let llvm_type = Self::llvm_type(type_str, ctx);
+        let llvm_type = if type_str == "bool" {
+            ctx.module().get_context().i64_type().into()
+        } else {
+            Self::llvm_type(type_str, ctx)
+        };
         let ptr = ctx.builder().build_alloca(llvm_type, name).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,

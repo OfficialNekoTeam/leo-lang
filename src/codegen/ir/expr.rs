@@ -527,8 +527,76 @@ impl IrBuilder {
         })?;
         let left_ptr = self.eval_string_arg(left, ctx)?;
         let right_ptr = self.eval_string_arg(right, ctx)?;
-        // malloc(4096) for result buffer
-        let buf_size = i64_type.const_int(4096, false);
+        let strlen_fn = ctx.module().get_function("strlen").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strlen not declared".into(),
+            )
+        })?;
+        let left_len_call = ctx
+            .builder()
+            .build_call(strlen_fn, &[left_ptr.into()], "left_len")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen left failed".into(),
+                )
+            })?;
+        let left_len = left_len_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen void".into(),
+                )
+            })?
+            .into_int_value();
+        let right_len_call = ctx
+            .builder()
+            .build_call(strlen_fn, &[right_ptr.into()], "right_len")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen right failed".into(),
+                )
+            })?;
+        let right_len = right_len_call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strlen void".into(),
+                )
+            })?
+            .into_int_value();
+        let one = i64_type.const_int(1, false);
+        let sum_len = ctx
+            .builder()
+            .build_int_add(left_len, right_len, "sum_len")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "add failed".into(),
+                )
+            })?;
+        let buf_size = ctx
+            .builder()
+            .build_int_add(sum_len, one, "total_size")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "add failed".into(),
+                )
+            })?;
         let buf_alloc = ctx
             .builder()
             .build_call(malloc_fn, &[buf_size.into()], "concat_buf")
@@ -539,23 +607,32 @@ impl IrBuilder {
                     "malloc concat failed".into(),
                 )
             })?;
+        let buf_raw = buf_alloc
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "malloc void".into(),
+                )
+            })?
+            .into_pointer_value();
+        // NULL check: abort if concat buffer malloc failed
+        let buf_i64 = ctx
+            .builder()
+            .build_ptr_to_int(buf_raw, i64_type, "concat_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(buf_i64, "runtime error: out of memory\n", ctx)?;
         let buf_ptr = ctx
             .builder()
-            .build_pointer_cast(
-                buf_alloc
-                    .try_as_basic_value()
-                    .left()
-                    .ok_or_else(|| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "malloc void".into(),
-                        )
-                    })?
-                    .into_pointer_value(),
-                i8_ptr_type,
-                "concat_i8",
-            )
+            .build_pointer_cast(buf_raw, i8_ptr_type, "concat_i8")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -653,8 +730,14 @@ impl IrBuilder {
             BinOp::Add => ctx.builder().build_int_add(lv, rv, "add"),
             BinOp::Sub => ctx.builder().build_int_sub(lv, rv, "sub"),
             BinOp::Mul => ctx.builder().build_int_mul(lv, rv, "mul"),
-            BinOp::Div => ctx.builder().build_int_signed_div(lv, rv, "div"),
-            BinOp::Mod => ctx.builder().build_int_signed_rem(lv, rv, "rem"),
+            BinOp::Div => {
+                self.emit_div_zero_check(rv, "runtime error: division by zero\n", ctx)?;
+                ctx.builder().build_int_signed_div(lv, rv, "div")
+            }
+            BinOp::Mod => {
+                self.emit_div_zero_check(rv, "runtime error: division by zero\n", ctx)?;
+                ctx.builder().build_int_signed_rem(lv, rv, "rem")
+            }
             BinOp::Eq => ctx
                 .builder()
                 .build_int_compare(IntPredicate::EQ, lv, rv, "eq")

@@ -12,6 +12,7 @@ impl IrBuilder {
         }
         let obj_val = self.eval_int(obj, ctx)?;
         let idx_val = self.eval_int(idx, ctx)?;
+        self.emit_nonneg_check(idx_val, "runtime error: negative index\n", ctx)?;
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
@@ -223,9 +224,22 @@ impl IrBuilder {
                         "malloc void".into(),
                     )
                 })?;
+                let mem_pval = mem_ptr.into_pointer_value();
+                // NULL check: abort if array malloc failed
+                let mem_i64 = ctx
+                    .builder()
+                    .build_ptr_to_int(mem_pval, i64_type, "arr_i64")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "ptr_to_int failed".into(),
+                        )
+                    })?;
+                self.emit_null_check(mem_i64, "runtime error: out of memory\n", ctx)?;
                 let base = ctx
                     .builder()
-                    .build_pointer_cast(mem_ptr.into_pointer_value(), i64_ptr_type, "array_base")
+                    .build_pointer_cast(mem_pval, i64_ptr_type, "array_base")
                     .map_err(|_| {
                         LeoError::new(
                             ErrorKind::Syntax,
@@ -307,9 +321,22 @@ impl IrBuilder {
                         "malloc void".into(),
                     )
                 })?;
+                let mem_pval = mem_ptr.into_pointer_value();
+                // NULL check: abort if array repeat malloc failed
+                let mem_i64 = ctx
+                    .builder()
+                    .build_ptr_to_int(mem_pval, i64_type, "arr_i64")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "ptr_to_int failed".into(),
+                        )
+                    })?;
+                self.emit_null_check(mem_i64, "runtime error: out of memory\n", ctx)?;
                 let base = ctx
                     .builder()
-                    .build_pointer_cast(mem_ptr.into_pointer_value(), i64_ptr_type, "array_base")
+                    .build_pointer_cast(mem_pval, i64_ptr_type, "array_base")
                     .map_err(|_| {
                         LeoError::new(
                             ErrorKind::Syntax,
@@ -390,9 +417,22 @@ impl IrBuilder {
                         "malloc void".into(),
                     )
                 })?;
+                let mem_pval = mem_ptr.into_pointer_value();
+                // NULL check: abort if struct malloc failed
+                let mem_i64 = ctx
+                    .builder()
+                    .build_ptr_to_int(mem_pval, i64_type, "struct_i64")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "ptr_to_int failed".into(),
+                        )
+                    })?;
+                self.emit_null_check(mem_i64, "runtime error: out of memory\n", ctx)?;
                 let base = ctx
                     .builder()
-                    .build_pointer_cast(mem_ptr.into_pointer_value(), i64_ptr_type, "struct_base")
+                    .build_pointer_cast(mem_pval, i64_ptr_type, "struct_base")
                     .map_err(|_| {
                         LeoError::new(
                             ErrorKind::Syntax,

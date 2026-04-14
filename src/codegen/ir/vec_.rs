@@ -34,9 +34,22 @@ impl IrBuilder {
                 "malloc void".into(),
             )
         })?;
+        // NULL check: abort if header malloc failed
+        let header_ptr = header_raw.into_pointer_value();
+        let header_i64 = ctx
+            .builder()
+            .build_ptr_to_int(header_ptr, i64_type, "vec_hdr_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(header_i64, "runtime error: out of memory\n", ctx)?;
         let header = ctx
             .builder()
-            .build_pointer_cast(header_raw.into_pointer_value(), i64_ptr_type, "vec_hdr")
+            .build_pointer_cast(header_ptr, i64_ptr_type, "vec_hdr")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -97,9 +110,11 @@ impl IrBuilder {
                 "void".into(),
             )
         })?;
+        // NULL check: abort if data malloc failed
+        let dr_ptr = dr.into_pointer_value();
         let di = ctx
             .builder()
-            .build_ptr_to_int(dr.into_pointer_value(), i64_type, "di")
+            .build_ptr_to_int(dr_ptr, i64_type, "di")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -107,6 +122,7 @@ impl IrBuilder {
                     "ptr_to_int".into(),
                 )
             })?;
+        self.emit_null_check(di, "runtime error: out of memory\n", ctx)?;
         let dp = unsafe {
             ctx.builder()
                 .build_in_bounds_gep(header, &[two], "vdp")
@@ -196,6 +212,13 @@ impl IrBuilder {
                 )
             })?
             .into_int_value();
+        let dps = unsafe {
+            ctx.builder()
+                .build_in_bounds_gep(header, &[two], "dps")
+                .map_err(|_| {
+                    LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep".into())
+                })?
+        };
         let full = ctx
             .builder()
             .build_int_compare(IntPredicate::EQ, len_v, cap_v, "full")
@@ -222,6 +245,34 @@ impl IrBuilder {
             })?;
         // grow block
         ctx.builder().position_at_end(grow_bb);
+        // Check cap won't overflow when doubled
+        let max_half = i64_type.const_int((i64::MAX / 2) as u64, false);
+        let cap_too_big = ctx
+            .builder()
+            .build_int_compare(IntPredicate::SGT, cap_v, max_half, "cap_overflow")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "overflow compare failed".into(),
+                )
+            })?;
+        let overflow_fail = context.append_basic_block(func, "vec_overflow_fail");
+        let overflow_ok = context.append_basic_block(func, "vec_overflow_ok");
+        ctx.builder()
+            .build_conditional_branch(cap_too_big, overflow_fail, overflow_ok)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "overflow branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(overflow_fail);
+        self.emit_puts("runtime error: vec capacity overflow\n", ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(overflow_ok);
         let new_cap = ctx
             .builder()
             .build_int_mul(cap_v, i64_type.const_int(2, false), "nc")
@@ -235,13 +286,6 @@ impl IrBuilder {
                 "store".into(),
             )
         })?;
-        let dps = unsafe {
-            ctx.builder()
-                .build_in_bounds_gep(header, &[two], "dps")
-                .map_err(|_| {
-                    LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep".into())
-                })?
-        };
         let old_di = ctx
             .builder()
             .build_load(dps, "odi")
@@ -282,22 +326,32 @@ impl IrBuilder {
                     "realloc".into(),
                 )
             })?;
+        let nd_raw = nd
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "void".into(),
+                )
+            })?
+            .into_pointer_value();
+        // NULL check: abort if realloc failed
+        let nd_i64 = ctx
+            .builder()
+            .build_ptr_to_int(nd_raw, i64_type, "nd_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(nd_i64, "runtime error: out of memory\n", ctx)?;
         let ndp = ctx
             .builder()
-            .build_pointer_cast(
-                nd.try_as_basic_value()
-                    .left()
-                    .ok_or_else(|| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "void".into(),
-                        )
-                    })?
-                    .into_pointer_value(),
-                i64_ptr_type,
-                "ndp",
-            )
+            .build_pointer_cast(nd_raw, i64_ptr_type, "ndp")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -393,12 +447,37 @@ impl IrBuilder {
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
         let vec_val = self.eval_int(&args[0], ctx)?;
         let idx_val = self.eval_int(&args[1], ctx)?;
+        self.emit_nonneg_check(idx_val, "runtime error: negative vec index\n", ctx)?;
         let header = ctx
             .builder()
             .build_int_to_ptr(vec_val, i64_ptr_type, "vh")
             .map_err(|_| {
                 LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "i2p".into())
             })?;
+        let len_ptr = unsafe {
+            ctx.builder()
+                .build_in_bounds_gep(header, &[i64_type.const_int(0, false)], "len_ptr")
+                .map_err(|_| {
+                    LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep".into())
+                })?
+        };
+        let len_val = ctx
+            .builder()
+            .build_load(len_ptr, "vec_len")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "load".into(),
+                )
+            })?
+            .into_int_value();
+        self.emit_bounds_check(
+            idx_val,
+            len_val,
+            "runtime error: vec index out of bounds\n",
+            ctx,
+        )?;
         let dps = unsafe {
             ctx.builder()
                 .build_in_bounds_gep(header, &[i64_type.const_int(2, false)], "dps")
@@ -537,6 +616,18 @@ impl IrBuilder {
                 )
             })?
             .into_pointer_value();
+        // NULL check: abort if fopen for read failed
+        let fp_i64 = ctx
+            .builder()
+            .build_ptr_to_int(fp_ptr, i64_type, "fp_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(fp_i64, "runtime error: cannot open file\n", ctx)?;
         let buf_sz = i64_type.const_int(65536, false);
         let buf = ctx
             .builder()
@@ -548,22 +639,32 @@ impl IrBuilder {
                     "malloc".into(),
                 )
             })?;
+        let buf_raw = buf
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "void".into(),
+                )
+            })?
+            .into_pointer_value();
+        // NULL check: abort if file buffer malloc failed
+        let buf_i64 = ctx
+            .builder()
+            .build_ptr_to_int(buf_raw, i64_type, "buf_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(buf_i64, "runtime error: out of memory\n", ctx)?;
         let buf_ptr = ctx
             .builder()
-            .build_pointer_cast(
-                buf.try_as_basic_value()
-                    .left()
-                    .ok_or_else(|| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "void".into(),
-                        )
-                    })?
-                    .into_pointer_value(),
-                i8_ptr_type,
-                "fbuf",
-            )
+            .build_pointer_cast(buf_raw, i8_ptr_type, "fbuf")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -681,6 +782,18 @@ impl IrBuilder {
                 )
             })?
             .into_pointer_value();
+        // NULL check: abort if fopen for write failed
+        let fp_i64 = ctx
+            .builder()
+            .build_ptr_to_int(fp_ptr, i64_type, "fp_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        self.emit_null_check(fp_i64, "runtime error: cannot open file\n", ctx)?;
         let clen = ctx
             .builder()
             .build_call(strlen_fn, &[content_ptr.into()], "clen")

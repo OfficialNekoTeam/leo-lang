@@ -148,6 +148,7 @@ impl IrBuilder {
         };
         self.emit_puts(&msg, ctx)?;
         self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
 
         ctx.builder().position_at_end(pass_block);
         Ok(context.i64_type().const_int(0, false))
@@ -161,6 +162,207 @@ impl IrBuilder {
                 .add_function("abort", void_type.fn_type(&[], false), None)
         });
         ctx.builder().build_call(abort_fn, &[], "abort").ok();
+    }
+
+    /// Runtime NULL check after malloc/realloc/fopen.
+    /// Compares ptr (as i64) to zero. If null, prints msg and aborts.
+    /// Builder is positioned at the ok_block after return.
+    pub(super) fn emit_null_check<'a>(
+        &mut self,
+        ptr_val: inkwell::values::IntValue<'a>,
+        msg: &str,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        let function = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function for null check".into(),
+                )
+            })?;
+        let context = ctx.module().get_context();
+        let fail_block = context.append_basic_block(function, "null_fail");
+        let ok_block = context.append_basic_block(function, "null_ok");
+        let zero = context.i64_type().const_int(0, false);
+        let is_null = ctx
+            .builder()
+            .build_int_compare(IntPredicate::EQ, ptr_val, zero, "is_null")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "null compare failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_conditional_branch(is_null, fail_block, ok_block)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "null branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(fail_block);
+        self.emit_puts(msg, ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(ok_block);
+        Ok(())
+    }
+
+    /// Runtime non-negative check for index values.
+    /// If val < 0, prints msg and aborts. Builder positioned at ok_block after return.
+    pub(super) fn emit_nonneg_check<'a>(
+        &mut self,
+        val: inkwell::values::IntValue<'a>,
+        msg: &str,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        let function = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function for nonneg check".into(),
+                )
+            })?;
+        let context = ctx.module().get_context();
+        let fail_block = context.append_basic_block(function, "neg_fail");
+        let ok_block = context.append_basic_block(function, "neg_ok");
+        let zero = context.i64_type().const_int(0, false);
+        let is_neg = ctx
+            .builder()
+            .build_int_compare(IntPredicate::SLT, val, zero, "is_neg")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "nonneg compare failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_conditional_branch(is_neg, fail_block, ok_block)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "nonneg branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(fail_block);
+        self.emit_puts(msg, ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(ok_block);
+        Ok(())
+    }
+
+    /// Runtime bounds check: val must be < len.
+    /// If val >= len, prints msg and aborts. Builder positioned at ok_block after return.
+    pub(super) fn emit_bounds_check<'a>(
+        &mut self,
+        val: inkwell::values::IntValue<'a>,
+        len: inkwell::values::IntValue<'a>,
+        msg: &str,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        let function = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function for bounds check".into(),
+                )
+            })?;
+        let context = ctx.module().get_context();
+        let fail_block = context.append_basic_block(function, "oob_fail");
+        let ok_block = context.append_basic_block(function, "oob_ok");
+        let oob = ctx
+            .builder()
+            .build_int_compare(IntPredicate::SGE, val, len, "is_oob")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "bounds compare failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_conditional_branch(oob, fail_block, ok_block)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "bounds branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(fail_block);
+        self.emit_puts(msg, ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(ok_block);
+        Ok(())
+    }
+
+    /// Runtime division-by-zero check.
+    /// If divisor == 0, prints msg and aborts. Builder positioned at ok_block after return.
+    pub(super) fn emit_div_zero_check<'a>(
+        &mut self,
+        divisor: inkwell::values::IntValue<'a>,
+        msg: &str,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<()> {
+        let function = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function for div-zero check".into(),
+                )
+            })?;
+        let context = ctx.module().get_context();
+        let fail_block = context.append_basic_block(function, "divz_fail");
+        let ok_block = context.append_basic_block(function, "divz_ok");
+        let zero = context.i64_type().const_int(0, false);
+        let is_zero = ctx
+            .builder()
+            .build_int_compare(IntPredicate::EQ, divisor, zero, "is_zero_div")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "div-zero compare failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_conditional_branch(is_zero, fail_block, ok_block)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "div-zero branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(fail_block);
+        self.emit_puts(msg, ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(ok_block);
+        Ok(())
     }
 
     /// Evaluate a string expression to an i8* LLVM pointer value.
