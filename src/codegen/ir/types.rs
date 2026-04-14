@@ -60,17 +60,65 @@ impl IrBuilder {
         match field {
             "len" => match obj {
                 Expr::Ident(name, _) => {
-                    if self.string_vars.contains(name) {
+                    let struct_len_idx = self
+                        .var_types
+                        .get(name)
+                        .and_then(|st| self.struct_fields.get(st))
+                        .and_then(|fields| fields.iter().position(|f| f == "len"));
+                    if let Some(idx) = struct_len_idx {
+                        let obj_val = self.eval_int(obj, ctx)?;
+                        let obj_ptr = ctx
+                            .builder()
+                            .build_int_to_ptr(
+                                obj_val,
+                                i64_type.ptr_type(AddressSpace::default()),
+                                "struct_ptr",
+                            )
+                            .map_err(|_| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    "int_to_ptr failed".into(),
+                                )
+                            })?;
+                        let field_ptr = unsafe {
+                            ctx.builder()
+                                .build_in_bounds_gep(
+                                    obj_ptr,
+                                    &[i64_type.const_int(idx as u64, false)],
+                                    "len_field",
+                                )
+                                .map_err(|_| {
+                                    LeoError::new(
+                                        ErrorKind::Syntax,
+                                        ErrorCode::CodegenLLVMError,
+                                        "gep len field failed".into(),
+                                    )
+                                })?
+                        };
+                        let loaded =
+                            ctx.builder()
+                                .build_load(field_ptr, "len_val")
+                                .map_err(|_| {
+                                    LeoError::new(
+                                        ErrorKind::Syntax,
+                                        ErrorCode::CodegenLLVMError,
+                                        "load len field failed".into(),
+                                    )
+                                })?;
+                        return Ok(loaded.into_int_value());
+                    }
+                    if self.is_string_var(name, ctx) {
                         return self.runtime_strlen(name, ctx);
                     }
-                    let size = self.array_sizes.get(name).copied().ok_or_else(|| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            format!("{} has no known length", name),
-                        )
-                    })?;
-                    Ok(i64_type.const_int(size as u64, false))
+                    if let Some(size) = self.array_sizes.get(name).copied() {
+                        return Ok(i64_type.const_int(size as u64, false));
+                    }
+                    Err(LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        format!("{} has no known length", name),
+                    ))
                 }
                 Expr::String(s, _) => Ok(i64_type.const_int(s.len() as u64, false)),
                 _ => Err(LeoError::new(

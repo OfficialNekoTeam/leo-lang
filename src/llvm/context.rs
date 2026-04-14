@@ -1,11 +1,22 @@
+use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::builder::Builder;
 use inkwell::values::{FunctionValue, PointerValue};
 use std::collections::HashMap;
 
 pub struct EnumDef {
     pub variants: Vec<String>,
+}
+
+/// Compile-time type tag for LLVM value tracking
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeoType {
+    Int,
+    Float,
+    Bool,
+    Str,
+    Char,
+    Ptr,
 }
 
 pub struct LlvmContext<'ctx> {
@@ -15,6 +26,7 @@ pub struct LlvmContext<'ctx> {
     variables: HashMap<String, PointerValue<'ctx>>,
     current_fn: Option<FunctionValue<'ctx>>,
     enums: HashMap<String, EnumDef>,
+    types: HashMap<String, LeoType>,
 }
 
 impl<'ctx> LlvmContext<'ctx> {
@@ -22,17 +34,31 @@ impl<'ctx> LlvmContext<'ctx> {
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
-        Self { module, builder, functions: HashMap::new(), variables: HashMap::new(), current_fn: None, enums: HashMap::new() }
+        Self {
+            module,
+            builder,
+            functions: HashMap::new(),
+            variables: HashMap::new(),
+            current_fn: None,
+            enums: HashMap::new(),
+            types: HashMap::new(),
+        }
     }
 
     /// Get reference to module
-    pub fn module(&self) -> &Module<'ctx> { &self.module }
+    pub fn module(&self) -> &Module<'ctx> {
+        &self.module
+    }
 
     /// Get mutable reference to module (needed for add_global etc.)
-    pub fn module_mut(&mut self) -> &mut Module<'ctx> { &mut self.module }
+    pub fn module_mut(&mut self) -> &mut Module<'ctx> {
+        &mut self.module
+    }
 
     /// Get reference to builder
-    pub fn builder(&self) -> &Builder<'ctx> { &self.builder }
+    pub fn builder(&self) -> &Builder<'ctx> {
+        &self.builder
+    }
 
     /// Register a function value by name
     pub fn register_function(&mut self, name: String, fv: FunctionValue<'ctx>) {
@@ -58,6 +84,7 @@ impl<'ctx> LlvmContext<'ctx> {
     pub fn clear_variables(&mut self) {
         self.variables.clear();
         self.current_fn = None;
+        self.types.clear();
     }
 
     /// Set the currently-being-compiled function (for return type queries)
@@ -80,13 +107,29 @@ impl<'ctx> LlvmContext<'ctx> {
 
     pub fn get_enum_variant_tag(&self, enum_name: &str, variant_name: &str) -> Option<u32> {
         self.enums.get(enum_name).and_then(|edef| {
-            edef.variants.iter().position(|v| v == variant_name).map(|i| i as u32)
+            edef.variants
+                .iter()
+                .position(|v| v == variant_name)
+                .map(|i| i as u32)
         })
+    }
+
+    pub fn register_type(&mut self, name: String, ty: LeoType) {
+        self.types.insert(name, ty);
+    }
+
+    pub fn get_type(&self, name: &str) -> Option<&LeoType> {
+        self.types.get(name)
+    }
+
+    pub fn clear_types(&mut self) {
+        self.types.clear();
     }
 
     /// Write bitcode to file
     pub fn write_bitcode(&self, path: &str) -> Result<(), String> {
-        self.module.write_bitcode_to_path(path.as_ref())
+        self.module
+            .write_bitcode_to_path(path.as_ref())
             .then_some(())
             .ok_or_else(|| format!("failed to write bitcode to {}", path))
     }

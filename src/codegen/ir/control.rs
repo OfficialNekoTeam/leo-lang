@@ -10,6 +10,9 @@ impl IrBuilder {
             Stmt::Assign(name, expr) => {
                 self.build_assign(name, expr, ctx)?;
             }
+            Stmt::FieldAssign(obj, field, expr) => {
+                self.build_field_assign(obj, field, expr, ctx)?;
+            }
             Stmt::While(cond, body, _span) => {
                 self.build_while(cond, body, ctx)?;
             }
@@ -123,12 +126,24 @@ impl IrBuilder {
                         self.string_vars.insert(name.to_string());
                     }
                 }
+                Expr::Call(callee, _, _) => {
+                    if let Expr::Ident(fn_name, _) = callee.as_ref() {
+                        if matches!(
+                            fn_name.as_str(),
+                            "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read"
+                        ) {
+                            self.string_vars.insert(name.to_string());
+                        }
+                    }
+                }
                 _ => {
                     if type_str == "str" {
                         self.string_vars.insert(name.to_string());
                     }
                 }
             }
+            let inferred_type = self.infer_type(expr, type_str);
+            ctx.register_type(name.to_string(), inferred_type);
             let val = self.eval_expr_to_value(expr, ctx)?;
             ctx.builder().build_store(ptr, val).map_err(|_| {
                 LeoError::new(
@@ -163,6 +178,10 @@ impl IrBuilder {
                 format!("store failed for {}", name),
             )
         })?;
+        let inferred = self.infer_type(expr, "");
+        if inferred != crate::llvm::context::LeoType::Ptr {
+            ctx.register_type(name.to_string(), inferred);
+        }
         Ok(())
     }
 
@@ -568,5 +587,121 @@ impl IrBuilder {
 
         ctx.builder().position_at_end(merge_block);
         Ok(())
+    }
+
+    /// Build field assignment: obj.field = expr (GEP to field ptr, then store)
+    pub(super) fn build_field_assign(
+        &mut self,
+        obj: &Expr,
+        field: &str,
+        expr: &Expr,
+        ctx: &mut LlvmContext,
+    ) -> LeoResult<()> {
+        let i64_type = ctx.module().get_context().i64_type();
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+        let obj_val = self.eval_int(obj, ctx)?;
+        let rhs_val = self.eval_expr_to_value(expr, ctx)?;
+        let obj_ptr = ctx
+            .builder()
+            .build_int_to_ptr(obj_val, i64_ptr_type, "fassign_ptr")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "int_to_ptr for field assign failed".into(),
+                )
+            })?;
+        let field_idx = self.resolve_field_index(obj, field, i64_type);
+        let field_ptr = unsafe {
+            ctx.builder()
+                .build_in_bounds_gep(obj_ptr, &[field_idx], "fassign_field")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "gep for field assign failed".into(),
+                    )
+                })?
+        };
+        ctx.builder().build_store(field_ptr, rhs_val).map_err(|_| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "store field assign failed".into(),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Resolve field name to LLVM index constant, using struct_fields map or fallback
+    fn resolve_field_index<'a>(
+        &self,
+        obj: &Expr,
+        field: &str,
+        i64_type: inkwell::types::IntType<'a>,
+    ) -> inkwell::values::IntValue<'a> {
+        if let Expr::Ident(var_name, _) = obj {
+            if let Some(struct_type) = self.var_types.get(var_name) {
+                if let Some(fields) = self.struct_fields.get(struct_type) {
+                    if let Some(idx) = fields.iter().position(|f| f == field) {
+                        return i64_type.const_int(idx as u64, false);
+                    }
+                }
+            }
+        }
+        i64_type.const_int(0, false)
+    }
+
+    fn infer_type(&self, expr: &Expr, type_str: &str) -> crate::llvm::context::LeoType {
+        use crate::llvm::context::LeoType;
+        if type_str == "str" {
+            return LeoType::Str;
+        }
+        if type_str == "bool" {
+            return LeoType::Bool;
+        }
+        if type_str == "f64" {
+            return LeoType::Float;
+        }
+        if type_str == "char" {
+            return LeoType::Char;
+        }
+        match expr {
+            Expr::String(_, _) => LeoType::Str,
+            Expr::Number(_, _) => LeoType::Int,
+            Expr::Bool(_, _) => LeoType::Bool,
+            Expr::Char(_, _) => LeoType::Char,
+            Expr::Float(_, _) => LeoType::Float,
+            Expr::Call(callee, _, _) => {
+                if let Expr::Ident(fn_name, _) = callee.as_ref() {
+                    match fn_name.as_str() {
+                        "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read" => {
+                            LeoType::Str
+                        }
+                        "is_digit" | "is_alpha" | "is_alnum" => LeoType::Int,
+                        _ => LeoType::Int,
+                    }
+                } else {
+                    LeoType::Int
+                }
+            }
+            Expr::Binary(BinOp::Add, left, right, _) => {
+                if self.expr_is_string(left) || self.expr_is_string(right) {
+                    LeoType::Str
+                } else {
+                    LeoType::Int
+                }
+            }
+            Expr::StructInit(_, _, _) => LeoType::Ptr,
+            Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => LeoType::Ptr,
+            Expr::Ident(name, _) => {
+                if self.string_vars.contains(name) {
+                    LeoType::Str
+                } else {
+                    LeoType::Int
+                }
+            }
+            _ => LeoType::Int,
+        }
     }
 }

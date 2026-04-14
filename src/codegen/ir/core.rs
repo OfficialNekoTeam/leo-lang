@@ -100,7 +100,11 @@ impl IrBuilder {
                     .collect();
                 struct_type.set_body(&field_types, false);
                 let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                let field_type_names: Vec<String> =
+                    fields.iter().map(|(_, ty)| ty.clone()).collect();
                 self.struct_fields.insert(name.clone(), field_names);
+                self.struct_field_types
+                    .insert(name.clone(), field_type_names);
             }
             Stmt::Enum(name, variants, _) => {
                 let context = ctx.module().get_context();
@@ -209,6 +213,9 @@ impl IrBuilder {
             ctx.register_variable(pname.clone(), ptr);
             if self.struct_fields.contains_key(_pty) {
                 self.var_types.insert(pname.clone(), _pty.clone());
+            }
+            if _pty == "str" {
+                ctx.register_type(pname.clone(), crate::llvm::context::LeoType::Str);
             }
         }
 

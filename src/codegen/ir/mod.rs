@@ -24,6 +24,7 @@ pub struct IrBuilder {
     pub(super) string_vars: HashSet<String>,
     pub(super) tmp_counter: u64,
     pub(super) struct_fields: HashMap<String, Vec<String>>,
+    pub(super) struct_field_types: HashMap<String, Vec<String>>,
     pub(super) var_types: HashMap<String, String>,
     pub(super) methods: HashMap<(String, String), String>,
 }
@@ -35,6 +36,7 @@ impl IrBuilder {
             string_vars: HashSet::new(),
             tmp_counter: 0,
             struct_fields: HashMap::new(),
+            struct_field_types: HashMap::new(),
             var_types: HashMap::new(),
             methods: HashMap::new(),
         }
@@ -45,6 +47,7 @@ impl IrBuilder {
         self.array_sizes.clear();
         self.string_vars.clear();
         self.struct_fields.clear();
+        self.struct_field_types.clear();
         self.var_types.clear();
         self.methods.clear();
         self.declare_c_runtime(ctx);

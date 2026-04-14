@@ -42,7 +42,7 @@ impl IrBuilder {
                     self.emit_print_str(s, ctx)?
                 }
             }
-            Expr::Ident(name, _) if self.string_vars.contains(name) => {
+            Expr::Ident(name, _) if self.is_string_var(name, ctx) => {
                 let ptr = self.eval_string_arg(expr, ctx)?;
                 if newline {
                     self.emit_print_str_ptr(ptr, ctx)?;
@@ -181,7 +181,7 @@ impl IrBuilder {
                 let ptr = gv.as_pointer_value().const_cast(i8_ptr_type);
                 Ok(ptr)
             }
-            Expr::Ident(name, _) if self.string_vars.contains(name) => {
+            Expr::Ident(name, _) if self.is_string_var(name, ctx) => {
                 let i64_val = self.load_ident(name, ctx)?;
                 let ptr = ctx
                     .builder()
@@ -191,6 +191,20 @@ impl IrBuilder {
                             ErrorKind::Syntax,
                             ErrorCode::CodegenLLVMError,
                             "int_to_ptr for string var failed".into(),
+                        )
+                    })?;
+                Ok(ptr)
+            }
+            Expr::Select(_, _, _) | Expr::Call(_, _, _) | Expr::Binary(_, _, _, _) => {
+                let val = self.eval_int(expr, ctx)?;
+                let ptr = ctx
+                    .builder()
+                    .build_int_to_ptr(val, i8_ptr_type, "str_expr_ptr")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "int_to_ptr for string expr failed".into(),
                         )
                     })?;
                 Ok(ptr)

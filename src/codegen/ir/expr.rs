@@ -9,7 +9,7 @@ impl IrBuilder {
                 Ok(())
             }
             Expr::Ident(name, _) => {
-                if self.string_vars.contains(name) {
+                if self.is_string_var(name, ctx) {
                     let ptr = self.eval_string_arg(
                         &Expr::Ident(name.clone(), crate::common::span::Span::dummy()),
                         ctx,
@@ -191,6 +191,11 @@ impl IrBuilder {
                     "vec_len" => return self.builtin_vec_len(args, ctx),
                     "file_read" => return self.builtin_file_read(args, ctx),
                     "file_write" => return self.builtin_file_write(args, ctx),
+                    "char_to_str" => return self.builtin_char_to_str(args, ctx),
+                    "is_digit" => return self.builtin_is_digit(args, ctx),
+                    "is_alpha" => return self.builtin_is_alpha(args, ctx),
+                    "is_alnum" => return self.builtin_is_alnum(args, ctx),
+                    "to_string" => return self.builtin_to_string(args, ctx),
                     _ => {}
                 }
                 let func = ctx.get_function(&func_name).ok_or_else(|| {
@@ -246,18 +251,56 @@ impl IrBuilder {
             "len" => match obj {
                 Expr::Ident(name, _) => {
                     if let Some(size) = self.array_sizes.get(name).copied() {
-                        if self.string_vars.contains(name) {
+                        if self.is_string_var(name, ctx) {
                             return self.runtime_strlen(name, ctx);
                         }
                         return Ok(i64_type.const_int(size as u64, false));
                     }
-                    if self.string_vars.contains(name) {
+                    if self.is_string_var(name, ctx) {
                         return self.runtime_strlen(name, ctx);
                     }
                     Err(LeoError::new(
                         ErrorKind::Syntax,
                         ErrorCode::CodegenLLVMError,
                         format!("{} has no known length", name),
+                    ))
+                }
+                Expr::Select(inner_obj, field, _) => {
+                    if self.select_is_string(inner_obj, field, ctx) {
+                        let ptr = self.eval_string_arg(obj, ctx)?;
+                        let strlen_fn = ctx.module().get_function("strlen").ok_or_else(|| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "strlen not declared".into(),
+                            )
+                        })?;
+                        let result = ctx
+                            .builder()
+                            .build_call(strlen_fn, &[ptr.into()], "sel_strlen")
+                            .map_err(|_| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    "strlen call failed".into(),
+                                )
+                            })?;
+                        return Ok(result
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or_else(|| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    "strlen void".into(),
+                                )
+                            })?
+                            .into_int_value());
+                    }
+                    Err(LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        ".len() on select: not a string field".into(),
                     ))
                 }
                 Expr::String(s, _) => Ok(i64_type.const_int(s.len() as u64, false)),
@@ -564,6 +607,35 @@ impl IrBuilder {
         match expr {
             Expr::String(_, _) => true,
             Expr::Ident(name, _) => self.string_vars.contains(name),
+            Expr::Call(callee, _, _) => {
+                if let Expr::Ident(fn_name, _) = callee.as_ref() {
+                    matches!(
+                        fn_name.as_str(),
+                        "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read"
+                    )
+                } else {
+                    false
+                }
+            }
+            Expr::Binary(BinOp::Add, left, right, _) => {
+                self.expr_is_string(left) || self.expr_is_string(right)
+            }
+            Expr::Select(obj, field, _) => {
+                if let Expr::Ident(var_name, _) = obj.as_ref() {
+                    if let Some(struct_type) = self.var_types.get(var_name) {
+                        if let Some(fields) = self.struct_fields.get(struct_type) {
+                            if let Some(field_types) = self.struct_field_types.get(struct_type) {
+                                if let Some(idx) = fields.iter().position(|f| f == field) {
+                                    if let Some(ty) = field_types.get(idx) {
+                                        return ty == "str";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -649,5 +721,35 @@ impl IrBuilder {
                 format!("{:?} failed", op),
             )
         })
+    }
+
+    pub(super) fn is_string_var(&self, name: &str, ctx: &LlvmContext) -> bool {
+        use crate::llvm::context::LeoType;
+        if let Some(ty) = ctx.get_type(name) {
+            return *ty == LeoType::Str;
+        }
+        self.string_vars.contains(name)
+    }
+
+    /// Check if obj.field is a string-typed struct field
+    fn select_is_string(&self, obj: &Expr, field: &str, ctx: &LlvmContext) -> bool {
+        use crate::llvm::context::LeoType;
+        if let Expr::Ident(var_name, _) = obj {
+            if let Some(struct_type) = self.var_types.get(var_name) {
+                if let Some(fields) = self.struct_fields.get(struct_type) {
+                    if let Some(field_types) = self.struct_field_types.get(struct_type) {
+                        if let Some(idx) = fields.iter().position(|f| f == field) {
+                            if let Some(ty_name) = field_types.get(idx) {
+                                return ty_name == "str";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(ty) = ctx.get_type(field) {
+            return *ty == LeoType::Str;
+        }
+        false
     }
 }
