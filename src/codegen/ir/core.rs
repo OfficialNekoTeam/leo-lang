@@ -10,6 +10,7 @@ impl IrBuilder {
             .ptr_type(AddressSpace::default());
         let i64_type = ctx.module().get_context().i64_type();
         let i32_type = ctx.module().get_context().i32_type();
+        let void_type = ctx.module().get_context().void_type();
         ctx.module_mut()
             .add_function("puts", i8_ptr.fn_type(&[], false), None);
         ctx.module_mut().add_function(
@@ -79,6 +80,13 @@ impl IrBuilder {
         );
         ctx.module_mut()
             .add_function("fclose", i32_type.fn_type(&[i8_ptr.into()], false), None);
+        ctx.module_mut()
+            .add_function("free", void_type.fn_type(&[i8_ptr.into()], false), None);
+        ctx.module_mut().add_function(
+            "snprintf",
+            i32_type.fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], true),
+            None,
+        );
     }
 
     /// Build top-level statement (function definitions, struct declarations)

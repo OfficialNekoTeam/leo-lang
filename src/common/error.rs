@@ -30,6 +30,7 @@ pub enum ErrorCode {
     LintNamingConvention,
     LintDataRace,
     LintUninitMemory,
+    LintOverflowRisk,
 }
 
 pub struct LeoError {
@@ -78,7 +79,11 @@ impl fmt::Display for LeoError {
 
 impl fmt::Debug for LeoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LeoError({:?}, {:?}): {}", self.kind, self.code, self.message)
+        write!(
+            f,
+            "LeoError({:?}, {:?}): {}",
+            self.kind, self.code, self.message
+        )
     }
 }
 
