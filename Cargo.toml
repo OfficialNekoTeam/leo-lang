@@ -1,0 +1,13 @@
+[package]
+name = "leo"
+version = "1.6.3"
+edition = "2021"
+
+[dependencies]
+inkwell = { version = "0.5", features = ["llvm14-0"] }
+
+[profile.release]
+strip = true
+opt-level = 3
+lto = true
+codegen-units = 1
