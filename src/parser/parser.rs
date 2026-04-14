@@ -215,7 +215,7 @@ impl Parser {
                 Ok(Stmt::Continue(span))
             }
             _ => {
-                // Try assignment: ident = expr
+                // Try ident = expr (simple assignment)
                 if let Token::Identifier(_) = &tws.token {
                     if self.pos + 1 < self.tokens.len() {
                         if matches!(
@@ -226,7 +226,30 @@ impl Parser {
                         }
                     }
                 }
+                // Parse expression, then check for = (field/index assignment)
                 let e = self.parse_expr()?;
+                if self.match_sym(Symbol::Equal) {
+                    let rhs = self.parse_expr()?;
+                    self.skip_semi();
+                    match &e {
+                        Expr::Select(obj, field, _) => {
+                            return Ok(Stmt::FieldAssign(obj.clone(), field.clone(), rhs));
+                        }
+                        Expr::Index(obj, idx, _) => {
+                            return Ok(Stmt::FieldAssign(
+                                Box::new(Expr::Index(
+                                    obj.clone(),
+                                    idx.clone(),
+                                    crate::common::span::Span::dummy(),
+                                )),
+                                "index".to_string(),
+                                rhs,
+                            ));
+                        }
+                        _ => {}
+                    }
+                    return Ok(Stmt::Expr(e));
+                }
                 self.skip_semi();
                 Ok(Stmt::Expr(e))
             }

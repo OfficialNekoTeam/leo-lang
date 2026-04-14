@@ -30,6 +30,11 @@ impl Checker {
         functions.insert("vec_len".to_string());
         functions.insert("file_read".to_string());
         functions.insert("file_write".to_string());
+        functions.insert("char_to_str".to_string());
+        functions.insert("is_digit".to_string());
+        functions.insert("is_alpha".to_string());
+        functions.insert("is_alnum".to_string());
+        functions.insert("to_string".to_string());
         Self {
             scope: Scope::new(),
             functions,
@@ -86,7 +91,7 @@ impl Checker {
                 self.check_expr(e)?;
             }
             Stmt::Let(name, ty, init) => self.check_let(name, ty, init)?,
-            Stmt::Assign(_, e) | Stmt::MutAssign(_, e) => {
+            Stmt::Assign(_, e) | Stmt::MutAssign(_, e) | Stmt::FieldAssign(_, _, e) => {
                 self.check_expr(e)?;
             }
             Stmt::Return(e, _) => {
@@ -313,14 +318,18 @@ impl Checker {
         let rt = self.check_expr(right)?;
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                if lt != rt {
+                if lt != rt && lt != "unknown" && rt != "unknown" {
                     return Err(LeoError::new(
                         ErrorKind::Semantic,
                         ErrorCode::SemaTypeMismatch,
                         format!("type mismatch: {} vs {}", lt, rt),
                     ));
                 }
-                Ok(lt)
+                if lt != "unknown" {
+                    Ok(lt)
+                } else {
+                    Ok(rt)
+                }
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 Ok("bool".to_string())
@@ -392,7 +401,7 @@ impl Checker {
     fn check_index(&mut self, obj: &Expr, idx: &Expr) -> LeoResult<String> {
         let obj_ty = self.check_expr(obj)?;
         let idx_ty = self.check_expr(idx)?;
-        if idx_ty != "i64" && idx_ty != "i32" {
+        if idx_ty != "i64" && idx_ty != "i32" && idx_ty != "unknown" {
             return Err(LeoError::new(
                 ErrorKind::Semantic,
                 ErrorCode::SemaTypeMismatch,

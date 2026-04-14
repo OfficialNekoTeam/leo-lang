@@ -7,11 +7,24 @@ pub enum Stmt {
     Let(String, Option<String>, Option<Expr>),
     Assign(String, Expr),
     MutAssign(String, Expr),
+    FieldAssign(Box<Expr>, String, Expr),
     If(Vec<(Expr, Vec<Stmt>)>, Option<Vec<Stmt>>, Span),
     While(Expr, Vec<Stmt>, Span),
     For(String, Expr, Vec<Stmt>, Span),
-    Function(String, Vec<(String, String)>, Option<String>, Vec<Stmt>, Span),
-    AsyncFunction(String, Vec<(String, String)>, Option<String>, Vec<Stmt>, Span),
+    Function(
+        String,
+        Vec<(String, String)>,
+        Option<String>,
+        Vec<Stmt>,
+        Span,
+    ),
+    AsyncFunction(
+        String,
+        Vec<(String, String)>,
+        Option<String>,
+        Vec<Stmt>,
+        Span,
+    ),
     Return(Option<Expr>, Span),
     Break(Option<Expr>, Span),
     Continue(Span),
@@ -44,6 +57,14 @@ mod tests {
     }
 
     #[test]
+    fn test_stmt_field_assign() {
+        let obj = Expr::Ident("self".to_string(), Span::dummy());
+        let val = Expr::Number(1, Span::dummy());
+        let stmt = Stmt::FieldAssign(Box::new(obj), "pos".to_string(), val);
+        assert!(matches!(stmt, Stmt::FieldAssign(_, _, _)));
+    }
+
+    #[test]
     fn test_stmt_if() {
         let cond = Expr::Bool(true, Span::dummy());
         let branches = vec![(cond, vec![])];
@@ -68,7 +89,13 @@ mod tests {
     #[test]
     fn test_stmt_function() {
         let params = vec![("x".to_string(), "i32".to_string())];
-        let stmt = Stmt::Function("foo".to_string(), params, Some("i32".to_string()), vec![], Span::dummy());
+        let stmt = Stmt::Function(
+            "foo".to_string(),
+            params,
+            Some("i32".to_string()),
+            vec![],
+            Span::dummy(),
+        );
         assert!(matches!(stmt, Stmt::Function(_, _, _, _, _)));
     }
 
