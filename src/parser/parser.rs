@@ -224,6 +224,15 @@ impl Parser {
                         ) {
                             return self.parse_assign();
                         }
+                        if matches!(
+                            self.tokens[self.pos + 1].token,
+                            Token::Symbol(Symbol::PlusEqual)
+                                | Token::Symbol(Symbol::MinusEqual)
+                                | Token::Symbol(Symbol::StarEqual)
+                                | Token::Symbol(Symbol::SlashEqual)
+                        ) {
+                            return self.parse_compound_assign();
+                        }
                     }
                 }
                 // Parse expression, then check for = (field/index assignment)
@@ -347,6 +356,32 @@ impl Parser {
         let expr = self.parse_expr()?;
         self.skip_semi();
         Ok(Stmt::Assign(name, expr))
+    }
+
+    /// Parse compound assignment: name += expr, name -= expr, etc.
+    /// Desugars to: name = name + expr
+    fn parse_compound_assign(&mut self) -> LeoResult<Stmt> {
+        let name = self.expect_ident()?;
+        let op = match &self.tokens[self.pos].token {
+            Token::Symbol(Symbol::PlusEqual) => BinOp::Add,
+            Token::Symbol(Symbol::MinusEqual) => BinOp::Sub,
+            Token::Symbol(Symbol::StarEqual) => BinOp::Mul,
+            Token::Symbol(Symbol::SlashEqual) => BinOp::Div,
+            _ => {
+                return Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::ParserUnexpectedToken,
+                    "expected compound assignment operator".into(),
+                ))
+            }
+        };
+        self.advance();
+        let rhs = self.parse_expr()?;
+        self.skip_semi();
+        let span = crate::common::span::Span::dummy();
+        let lhs_expr = Expr::Ident(name.clone(), span.clone());
+        let binary = Expr::Binary(op, Box::new(lhs_expr), Box::new(rhs), span);
+        Ok(Stmt::Assign(name, binary))
     }
 
     /// Parse const: const NAME: Type = expr

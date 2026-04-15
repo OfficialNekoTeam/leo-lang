@@ -456,21 +456,57 @@ impl IrBuilder {
             })?
             .into_int_value();
         let one = i64_type.const_int(1, false);
+        let max_sum = i64_type.const_int((i64::MAX - 1) as u64, false);
+        let sum_raw = ctx
+            .builder()
+            .build_int_add(a_len_val, b_len_val, "sum")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "add failed".into(),
+                )
+            })?;
+        let sum_overflow = ctx
+            .builder()
+            .build_int_compare(IntPredicate::SGT, sum_raw, max_sum, "concat_overflow")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "overflow cmp failed".into(),
+                )
+            })?;
+        let func = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function".into(),
+                )
+            })?;
+        let overflow_fail = context.append_basic_block(func, "concat_overflow_fail");
+        let overflow_ok = context.append_basic_block(func, "concat_overflow_ok");
+        ctx.builder()
+            .build_conditional_branch(sum_overflow, overflow_fail, overflow_ok)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "overflow branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(overflow_fail);
+        self.emit_puts("runtime error: string concat length overflow\n", ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(overflow_ok);
         let total = ctx
             .builder()
-            .build_int_add(
-                ctx.builder()
-                    .build_int_add(a_len_val, b_len_val, "sum")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "add failed".into(),
-                        )
-                    })?,
-                one,
-                "total",
-            )
+            .build_int_add(sum_raw, one, "total")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,

@@ -43,6 +43,11 @@ impl IrBuilder {
             None,
         );
         ctx.module_mut().add_function(
+            "strstr",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            None,
+        );
+        ctx.module_mut().add_function(
             "realloc",
             i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false),
             None,
@@ -80,6 +85,13 @@ impl IrBuilder {
         );
         ctx.module_mut()
             .add_function("fclose", i32_type.fn_type(&[i8_ptr.into()], false), None);
+        ctx.module_mut().add_function(
+            "fseek",
+            i32_type.fn_type(&[i8_ptr.into(), i64_type.into(), i32_type.into()], false),
+            None,
+        );
+        ctx.module_mut()
+            .add_function("ftell", i64_type.fn_type(&[i8_ptr.into()], false), None);
         ctx.module_mut()
             .add_function("free", void_type.fn_type(&[i8_ptr.into()], false), None);
         ctx.module_mut().add_function(

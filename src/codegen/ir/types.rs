@@ -13,6 +13,21 @@ impl IrBuilder {
         let obj_val = self.eval_int(obj, ctx)?;
         let idx_val = self.eval_int(idx, ctx)?;
         self.emit_nonneg_check(idx_val, "runtime error: negative index\n", ctx)?;
+        if let Expr::Ident(name, _) = obj {
+            if let Some(&size) = self.array_sizes.get(name) {
+                let arr_len = ctx
+                    .module()
+                    .get_context()
+                    .i64_type()
+                    .const_int(size as u64, false);
+                self.emit_bounds_check(
+                    idx_val,
+                    arr_len,
+                    "runtime error: array index out of bounds\n",
+                    ctx,
+                )?;
+            }
+        }
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
@@ -156,12 +171,14 @@ impl IrBuilder {
                     }
                 } else {
                     None
-                }
-                .unwrap_or_else(|| match field {
-                    "kind" | "x" | "a" => i64_type.const_int(0, false),
-                    "value" | "y" | "b" => i64_type.const_int(1, false),
-                    _ => i64_type.const_int(0, false),
-                });
+                };
+                let field_idx = field_idx.ok_or_else(|| {
+                    LeoError::new(
+                        ErrorKind::Semantic,
+                        ErrorCode::SemaTypeMismatch,
+                        format!("unknown field: .{}", field),
+                    )
+                })?;
                 let field_ptr = unsafe {
                     ctx.builder()
                         .build_in_bounds_gep(obj_ptr, &[field_idx], "field_ptr")
@@ -283,10 +300,51 @@ impl IrBuilder {
             }
             Expr::ArrayRepeat(val, count_expr, _) => {
                 let count_val = self.eval_int(count_expr, ctx)?;
-                let count_const = match count_expr.as_ref() {
+                let _count_const = match count_expr.as_ref() {
                     Expr::Number(n, _) => *n as u64,
                     _ => 1,
                 };
+                let context = ctx.module().get_context();
+                let i64_type = context.i64_type();
+                let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+                let max_alloc = i64_type.const_int((i64::MAX / 8) as u64, false);
+                let too_big = ctx
+                    .builder()
+                    .build_int_compare(IntPredicate::SGT, count_val, max_alloc, "arr_overflow")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "overflow compare failed".into(),
+                        )
+                    })?;
+                let func = ctx
+                    .builder()
+                    .get_insert_block()
+                    .and_then(|bb| bb.get_parent())
+                    .ok_or_else(|| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "no function".into(),
+                        )
+                    })?;
+                let overflow_fail = context.append_basic_block(func, "arrrep_overflow_fail");
+                let overflow_ok = context.append_basic_block(func, "arrrep_overflow_ok");
+                ctx.builder()
+                    .build_conditional_branch(too_big, overflow_fail, overflow_ok)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "overflow branch failed".into(),
+                        )
+                    })?;
+                ctx.builder().position_at_end(overflow_fail);
+                self.emit_puts("runtime error: array repeat size overflow\n", ctx)?;
+                self.emit_abort(ctx);
+                let _ = ctx.builder().build_unreachable();
+                ctx.builder().position_at_end(overflow_ok);
                 let alloc_size = ctx
                     .builder()
                     .build_int_mul(count_val, i64_type.const_int(8, false), "alloc_size")
@@ -345,27 +403,125 @@ impl IrBuilder {
                         )
                     })?;
                 let fill_val = self.eval_int(val, ctx)?;
-                for i in 0..count_const.min(1024) {
-                    let idx = i64_type.const_int(i as u64, false);
-                    let elem_ptr = unsafe {
-                        ctx.builder()
-                            .build_in_bounds_gep(base, &[idx], "store_ptr")
-                            .map_err(|_| {
-                                LeoError::new(
-                                    ErrorKind::Syntax,
-                                    ErrorCode::CodegenLLVMError,
-                                    "gep failed".into(),
-                                )
-                            })?
-                    };
-                    ctx.builder().build_store(elem_ptr, fill_val).map_err(|_| {
+                let func2 = ctx
+                    .builder()
+                    .get_insert_block()
+                    .and_then(|bb| bb.get_parent())
+                    .ok_or_else(|| {
                         LeoError::new(
                             ErrorKind::Syntax,
                             ErrorCode::CodegenLLVMError,
-                            "store elem failed".into(),
+                            "no function for fill loop".into(),
                         )
                     })?;
-                }
+                let loop_cond = context.append_basic_block(func2, "fill_cond");
+                let loop_body = context.append_basic_block(func2, "fill_body");
+                let loop_end = context.append_basic_block(func2, "fill_end");
+                let i_ptr = ctx
+                    .builder()
+                    .build_alloca(i64_type, "fill_i")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "alloca i failed".into(),
+                        )
+                    })?;
+                ctx.builder()
+                    .build_store(i_ptr, i64_type.const_int(0, false))
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "store i failed".into(),
+                        )
+                    })?;
+                ctx.builder()
+                    .build_unconditional_branch(loop_cond)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "br to cond failed".into(),
+                        )
+                    })?;
+                ctx.builder().position_at_end(loop_cond);
+                let cur_i = ctx
+                    .builder()
+                    .build_load(i_ptr, "cur_i")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "load i failed".into(),
+                        )
+                    })?
+                    .into_int_value();
+                let keep_going = ctx
+                    .builder()
+                    .build_int_compare(IntPredicate::SLT, cur_i, count_val, "keep_going")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "cmp failed".into(),
+                        )
+                    })?;
+                ctx.builder()
+                    .build_conditional_branch(keep_going, loop_body, loop_end)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "br cond failed".into(),
+                        )
+                    })?;
+                ctx.builder().position_at_end(loop_body);
+                let elem_ptr = unsafe {
+                    ctx.builder()
+                        .build_in_bounds_gep(base, &[cur_i], "store_ptr")
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "gep failed".into(),
+                            )
+                        })?
+                };
+                ctx.builder().build_store(elem_ptr, fill_val).map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "store elem failed".into(),
+                    )
+                })?;
+                let next_i = ctx
+                    .builder()
+                    .build_int_add(cur_i, i64_type.const_int(1, false), "next_i")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "add i failed".into(),
+                        )
+                    })?;
+                ctx.builder().build_store(i_ptr, next_i).map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "store next i failed".into(),
+                    )
+                })?;
+                ctx.builder()
+                    .build_unconditional_branch(loop_cond)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "br loop failed".into(),
+                        )
+                    })?;
+                ctx.builder().position_at_end(loop_end);
                 let result = ctx
                     .builder()
                     .build_ptr_to_int(base, i64_type, "array_as_int")

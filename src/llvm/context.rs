@@ -1,8 +1,15 @@
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::values::{FunctionValue, PointerValue};
 use std::collections::HashMap;
+
+/// Loop target for break/continue codegen
+pub struct LoopTarget<'ctx> {
+    pub continue_block: BasicBlock<'ctx>,
+    pub merge_block: BasicBlock<'ctx>,
+}
 
 pub struct EnumDef {
     pub variants: Vec<String>,
@@ -27,6 +34,7 @@ pub struct LlvmContext<'ctx> {
     current_fn: Option<FunctionValue<'ctx>>,
     enums: HashMap<String, EnumDef>,
     types: HashMap<String, LeoType>,
+    pub loop_stack: Vec<LoopTarget<'ctx>>,
 }
 
 impl<'ctx> LlvmContext<'ctx> {
@@ -42,6 +50,7 @@ impl<'ctx> LlvmContext<'ctx> {
             current_fn: None,
             enums: HashMap::new(),
             types: HashMap::new(),
+            loop_stack: Vec::new(),
         }
     }
 

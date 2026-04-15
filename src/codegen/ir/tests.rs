@@ -130,8 +130,43 @@ mod tests {
         builder.build(&stmts, &mut ctx).expect("build");
         let ir = ctx.print_module();
         assert!(
-            ir.contains("fopen") && ir.contains("fread"),
-            "file_read should use fopen+fread"
+            ir.contains("fopen")
+                && ir.contains("fread")
+                && ir.contains("fseek")
+                && ir.contains("ftell"),
+            "file_read should use fopen+fseek+ftell+fread"
+        );
+    }
+
+    #[test]
+    fn test_for_in_array_ir() {
+        let source = "fn main() {\nlet arr = [1, 2, 3]\nfor x in arr {\nprintln(x)\n}\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_for_arr");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("for.cond") && ir.contains("for.body") && ir.contains("for.elem_ptr"),
+            "for-in array should have cond, body, and element load"
+        );
+    }
+
+    #[test]
+    fn test_for_in_string_element_ir() {
+        let source = "fn main() {\nlet s: str = \"hi\"\nfor ch in s {\nprintln(ch)\n}\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_for_str_elem");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("for.char_ptr") && ir.contains("zext"),
+            "for-in string should load chars with zext"
         );
     }
 }

@@ -410,6 +410,11 @@ impl Lexer {
                 self.advance();
                 Some(Symbol::Bang)
             }
+            ('>', '>') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::RightShift)
+            }
             ('>', '=') => {
                 self.advance();
                 self.advance();
@@ -418,6 +423,11 @@ impl Lexer {
             ('>', _) => {
                 self.advance();
                 Some(Symbol::Greater)
+            }
+            ('<', '<') => {
+                self.advance();
+                self.advance();
+                Some(Symbol::LeftShift)
             }
             ('<', '=') => {
                 self.advance();

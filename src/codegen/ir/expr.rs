@@ -118,6 +118,9 @@ impl IrBuilder {
                 if let Some(result) = self.try_string_concat(op, left, right, ctx)? {
                     return Ok(result);
                 }
+                if matches!(op, BinOp::And | BinOp::Or) {
+                    return self.eval_short_circuit(op, left, right, ctx);
+                }
                 let lv = self.eval_int(left, ctx)?;
                 let rv = self.eval_int(right, ctx)?;
                 self.emit_binop(op, lv, rv, ctx)
@@ -577,7 +580,8 @@ impl IrBuilder {
             })?
             .into_int_value();
         let one = i64_type.const_int(1, false);
-        let sum_len = ctx
+        let max_sum = i64_type.const_int((i64::MAX - 1) as u64, false);
+        let sum_len_raw = ctx
             .builder()
             .build_int_add(left_len, right_len, "sum_len")
             .map_err(|_| {
@@ -587,9 +591,46 @@ impl IrBuilder {
                     "add failed".into(),
                 )
             })?;
+        let sum_overflow = ctx
+            .builder()
+            .build_int_compare(IntPredicate::SGT, sum_len_raw, max_sum, "concat2_overflow")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "overflow cmp failed".into(),
+                )
+            })?;
+        let func = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function".into(),
+                )
+            })?;
+        let overflow_fail = context.append_basic_block(func, "concat2_overflow_fail");
+        let overflow_ok = context.append_basic_block(func, "concat2_overflow_ok");
+        ctx.builder()
+            .build_conditional_branch(sum_overflow, overflow_fail, overflow_ok)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "overflow branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(overflow_fail);
+        self.emit_puts("runtime error: string concat length overflow\n", ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(overflow_ok);
         let buf_size = ctx
             .builder()
-            .build_int_add(sum_len, one, "total_size")
+            .build_int_add(sum_len_raw, one, "total_size")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -779,6 +820,143 @@ impl IrBuilder {
     }
 
     /// Emit unary operation (negate, bitwise not)
+    /// Short-circuit evaluation for && and ||
+    fn eval_short_circuit<'a>(
+        &mut self,
+        op: &BinOp,
+        left: &Expr,
+        right: &Expr,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let function = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function for short-circuit".into(),
+                )
+            })?;
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        let zero = i64_type.const_int(0, false);
+        let rhs_block = context.append_basic_block(function, "sc.rhs");
+        let merge_block = context.append_basic_block(function, "sc.merge");
+        let result_ptr = ctx
+            .builder()
+            .build_alloca(i64_type, "sc_result")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "alloca sc_result failed".into(),
+                )
+            })?;
+        let lv = self.eval_int(left, ctx)?;
+        let lv_nz = ctx
+            .builder()
+            .build_int_compare(IntPredicate::NE, lv, zero, "sc.lv_nz")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "sc cmp failed".into(),
+                )
+            })?;
+        match op {
+            BinOp::And => {
+                ctx.builder().build_store(result_ptr, zero).map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "store sc 0".into(),
+                    )
+                })?;
+                ctx.builder()
+                    .build_conditional_branch(lv_nz, rhs_block, merge_block)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "sc br".into(),
+                        )
+                    })?;
+            }
+            BinOp::Or => {
+                let one = i64_type.const_int(1, false);
+                ctx.builder().build_store(result_ptr, one).map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "store sc 1".into(),
+                    )
+                })?;
+                ctx.builder()
+                    .build_conditional_branch(lv_nz, merge_block, rhs_block)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "sc br".into(),
+                        )
+                    })?;
+            }
+            _ => {}
+        }
+        ctx.builder().position_at_end(rhs_block);
+        let rv = self.eval_int(right, ctx)?;
+        let rv_bool = ctx
+            .builder()
+            .build_int_compare(IntPredicate::NE, rv, zero, "sc.rv_nz")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "sc rv cmp".into(),
+                )
+            })?;
+        let rv_val = ctx
+            .builder()
+            .build_int_z_extend(rv_bool, i64_type, "sc_rv_bool")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "sc zext".into(),
+                )
+            })?;
+        ctx.builder().build_store(result_ptr, rv_val).map_err(|_| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "store sc rv".into(),
+            )
+        })?;
+        ctx.builder()
+            .build_unconditional_branch(merge_block)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "sc br merge".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(merge_block);
+        let result = ctx
+            .builder()
+            .build_load(result_ptr, "sc_val")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "load sc".into(),
+                )
+            })?;
+        Ok(result.into_int_value())
+    }
+
     pub(super) fn emit_unop<'a>(
         &mut self,
         op: &UnOp,

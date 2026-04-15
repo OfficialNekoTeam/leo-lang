@@ -427,10 +427,12 @@ impl IrBuilder {
     ) -> inkwell::values::GlobalValue<'a> {
         let context = ctx.module().get_context();
         let null_terminated = format!("{}\0", s);
+        let name = format!("__leo_str_{}_{}", self.tmp_counter, s.len());
+        self.tmp_counter += 1;
         let gv = ctx.module_mut().add_global(
             context.i8_type().array_type(null_terminated.len() as u32),
             Some(AddressSpace::default()),
-            &format!("__leo_str_{}_{}", s.len(), s.len() % 1000),
+            &name,
         );
         gv.set_initializer(&context.const_string(null_terminated.as_bytes(), false));
         gv.set_constant(true);

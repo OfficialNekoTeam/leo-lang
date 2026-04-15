@@ -91,6 +91,8 @@ pub enum Symbol {
     DoubleDot,
     Question,
     QuestionQuestion,
+    LeftShift,
+    RightShift,
 }
 
 impl Token {

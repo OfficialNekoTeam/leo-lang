@@ -1,4 +1,5 @@
 use super::*;
+use crate::llvm::context::LoopTarget;
 
 impl IrBuilder {
     /// Build statement inside function body (let, assign, while, if, expr, return)
@@ -39,6 +40,16 @@ impl IrBuilder {
             }
             Stmt::Expr(expr) => {
                 self.eval_and_emit(expr, ctx)?;
+            }
+            Stmt::Break(_, _) => {
+                if let Some(target) = ctx.loop_stack.last() {
+                    self.emit_branch(target.merge_block, ctx)?;
+                }
+            }
+            Stmt::Continue(_) => {
+                if let Some(target) = ctx.loop_stack.last() {
+                    self.emit_branch(target.continue_block, ctx)?;
+                }
             }
             _ => {}
         }
@@ -247,9 +258,14 @@ impl IrBuilder {
             })?;
 
         ctx.builder().position_at_end(body_block);
+        ctx.loop_stack.push(LoopTarget {
+            continue_block: cond_block,
+            merge_block,
+        });
         for stmt in body {
             self.build_body_stmt(stmt, ctx)?;
         }
+        ctx.loop_stack.pop();
         self.emit_branch(cond_block, ctx)?;
 
         ctx.builder().position_at_end(merge_block);
@@ -355,8 +371,7 @@ impl IrBuilder {
         Ok(())
     }
 
-    /// Build for-in loop over a string: for ch in s { body }
-    /// Compiles to: alloca i, alloca ch, br cond; cond: i < strlen(s) ? body : merge; body: ch=s[i], body_stmts, i++, br cond
+    /// Build for-in loop over string or array: for ch in s { body } / for x in arr { body }
     pub(super) fn build_for(
         &mut self,
         var: &str,
@@ -437,13 +452,25 @@ impl IrBuilder {
                     )
                 })?
                 .into_int_value()
+        } else if let Expr::Ident(name, _) = iter {
+            if let Some(&size) = self.array_sizes.get(name) {
+                i64_type.const_int(size as u64, false)
+            } else {
+                return Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    format!("for-in: cannot iterate over {}", name),
+                ));
+            }
         } else {
             return Err(LeoError::new(
                 ErrorKind::Syntax,
                 ErrorCode::CodegenLLVMError,
-                "for-in only supports string iteration".into(),
+                "for-in only supports string and array iteration".into(),
             ));
         };
+
+        let is_string_iter = self.expr_is_string(iter);
 
         let cond_block = context.append_basic_block(function, "for.cond");
         let body_block = context.append_basic_block(function, "for.body");
@@ -492,21 +519,11 @@ impl IrBuilder {
             })?;
 
         ctx.builder().position_at_end(body_block);
-        let str_ptr = self.eval_string_arg(iter, ctx)?;
-        let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
-        let casted = ctx
+
+        // Load current index
+        let cur_idx = ctx
             .builder()
-            .build_pointer_cast(str_ptr, i8_ptr_type, "for_str_i8")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr cast failed".into(),
-                )
-            })?;
-        let current_idx = ctx
-            .builder()
-            .build_load(iter_ptr, "cur_idx")
+            .build_load(iter_ptr, "for.cur_idx")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -515,78 +532,117 @@ impl IrBuilder {
                 )
             })?
             .into_int_value();
-        let char_ptr = unsafe {
-            ctx.builder()
-                .build_in_bounds_gep(casted, &[current_idx], "for_char_ptr")
+
+        // Load element at cur_idx into loop variable
+        let elem_val = if is_string_iter {
+            // String iteration: GEP into i8* + load byte + zext to i64
+            let str_ptr = self.eval_string_arg(iter, ctx)?;
+            let elem_ptr = unsafe {
+                ctx.builder()
+                    .build_in_bounds_gep(str_ptr, &[cur_idx], "for.char_ptr")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "gep for char failed".into(),
+                        )
+                    })?
+            };
+            let char_val = ctx
+                .builder()
+                .build_load(elem_ptr, "for.char_val")
                 .map_err(|_| {
                     LeoError::new(
                         ErrorKind::Syntax,
                         ErrorCode::CodegenLLVMError,
-                        "gep failed".into(),
+                        "load char failed".into(),
                     )
                 })?
+                .into_int_value();
+            ctx.builder()
+                .build_int_z_extend(char_val, i64_type, "for.char_i64")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "zext char failed".into(),
+                    )
+                })?
+        } else {
+            // Array iteration: int_to_ptr + GEP + load i64 element
+            let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+            let arr_val = self.eval_int(iter, ctx)?;
+            let arr_ptr = ctx
+                .builder()
+                .build_int_to_ptr(arr_val, i64_ptr_type, "for.arr_ptr")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "int_to_ptr for array failed".into(),
+                    )
+                })?;
+            let elem_ptr = unsafe {
+                ctx.builder()
+                    .build_in_bounds_gep(arr_ptr, &[cur_idx], "for.elem_ptr")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "gep for elem failed".into(),
+                        )
+                    })?
+            };
+            ctx.builder()
+                .build_load(elem_ptr, "for.elem_val")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "load elem failed".into(),
+                    )
+                })?
+                .into_int_value()
         };
-        let char_val = ctx
-            .builder()
-            .build_load(char_ptr, "for_char")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "load char failed".into(),
-                )
-            })?;
-        let extended = ctx
-            .builder()
-            .build_int_z_extend(char_val.into_int_value(), i64_type, "for_char_ext")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "zext failed".into(),
-                )
-            })?;
-        ctx.builder().build_store(var_ptr, extended).map_err(|_| {
+
+        // Store element into loop variable
+        ctx.builder().build_store(var_ptr, elem_val).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
                 ErrorCode::CodegenLLVMError,
-                "store iter var failed".into(),
+                format!("store {} failed", var).into(),
             )
         })?;
 
+        ctx.loop_stack.push(LoopTarget {
+            continue_block: cond_block,
+            merge_block,
+        });
         for stmt in body {
             self.build_body_stmt(stmt, ctx)?;
         }
+        ctx.loop_stack.pop();
 
+        // Increment index: i = i + 1
         let one = i64_type.const_int(1, false);
-        let cur = ctx
+        let next_idx = ctx
             .builder()
-            .build_load(iter_ptr, "idx_load")
+            .build_int_add(cur_idx, one, "for.next_idx")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
                     ErrorCode::CodegenLLVMError,
-                    "load idx failed".into(),
-                )
-            })?
-            .into_int_value();
-        let next = ctx
-            .builder()
-            .build_int_add(cur, one, "idx_next")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "add failed".into(),
+                    "inc idx failed".into(),
                 )
             })?;
-        ctx.builder().build_store(iter_ptr, next).map_err(|_| {
+        ctx.builder().build_store(iter_ptr, next_idx).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
                 ErrorCode::CodegenLLVMError,
-                "store idx failed".into(),
+                "store next_idx failed".into(),
             )
         })?;
+
         self.emit_branch(cond_block, ctx)?;
 
         ctx.builder().position_at_end(merge_block);
@@ -615,7 +671,7 @@ impl IrBuilder {
                     "int_to_ptr for field assign failed".into(),
                 )
             })?;
-        let field_idx = self.resolve_field_index(obj, field, i64_type);
+        let field_idx = self.resolve_field_index(obj, field, i64_type)?;
         let field_ptr = unsafe {
             ctx.builder()
                 .build_in_bounds_gep(obj_ptr, &[field_idx], "fassign_field")
@@ -643,17 +699,21 @@ impl IrBuilder {
         obj: &Expr,
         field: &str,
         i64_type: inkwell::types::IntType<'a>,
-    ) -> inkwell::values::IntValue<'a> {
+    ) -> LeoResult<inkwell::values::IntValue<'a>> {
         if let Expr::Ident(var_name, _) = obj {
             if let Some(struct_type) = self.var_types.get(var_name) {
                 if let Some(fields) = self.struct_fields.get(struct_type) {
                     if let Some(idx) = fields.iter().position(|f| f == field) {
-                        return i64_type.const_int(idx as u64, false);
+                        return Ok(i64_type.const_int(idx as u64, false));
                     }
                 }
             }
         }
-        i64_type.const_int(0, false)
+        Err(LeoError::new(
+            ErrorKind::Semantic,
+            ErrorCode::SemaTypeMismatch,
+            format!("unknown field: .{}", field),
+        ))
     }
 
     fn infer_type(&self, expr: &Expr, type_str: &str) -> crate::llvm::context::LeoType {

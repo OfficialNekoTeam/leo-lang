@@ -572,8 +572,87 @@ impl IrBuilder {
         }
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();
+        let i32_type = context.i32_type();
         let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
         let path_ptr = self.eval_string_arg(&args[0], ctx)?;
+        let strstr_fn = ctx.module().get_function("strstr").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strstr not declared".into(),
+            )
+        })?;
+        let dotdot_gv = self.emit_string_global("..", ctx);
+        let dotdot_ptr = dotdot_gv.as_pointer_value().const_cast(i8_ptr_type);
+        let dotdot_result = ctx
+            .builder()
+            .build_call(
+                strstr_fn,
+                &[path_ptr.into(), dotdot_ptr.into()],
+                "path_dotdot",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strstr dotdot failed".into(),
+                )
+            })?;
+        let dotdot_val = dotdot_result.try_as_basic_value().left().ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strstr returned void".into(),
+            )
+        })?;
+        let dotdot_found = ctx
+            .builder()
+            .build_ptr_to_int(dotdot_val.into_pointer_value(), i64_type, "dotdot_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        let func = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function".into(),
+                )
+            })?;
+        let path_fail_bb = context.append_basic_block(func, "path_trav_fail");
+        let path_ok_bb = context.append_basic_block(func, "path_trav_ok");
+        let zero = i64_type.const_int(0, false);
+        let dotdot_present = ctx
+            .builder()
+            .build_int_compare(IntPredicate::NE, dotdot_found, zero, "dotdot_present")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "compare failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_conditional_branch(dotdot_present, path_fail_bb, path_ok_bb)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(path_fail_bb);
+        self.emit_puts("runtime error: path traversal blocked\n", ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(path_ok_bb);
         let fopen_fn = ctx.module().get_function("fopen").ok_or_else(|| {
             LeoError::new(
                 ErrorKind::Syntax,
@@ -637,10 +716,88 @@ impl IrBuilder {
                 )
             })?;
         self.emit_null_check(fp_i64, "runtime error: cannot open file\n", ctx)?;
-        let buf_sz = i64_type.const_int(65536, false);
+        let fseek_fn = ctx.module().get_function("fseek").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "fseek not declared".into(),
+            )
+        })?;
+        let ftell_fn = ctx.module().get_function("ftell").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "ftell not declared".into(),
+            )
+        })?;
+        // fseek(fp, 0, SEEK_END) to get file size
+        let seek_end = i32_type.const_int(2, false);
+        let zero_i64 = i64_type.const_int(0, false);
+        ctx.builder()
+            .build_call(
+                fseek_fn,
+                &[fp_ptr.into(), zero_i64.into(), seek_end.into()],
+                "fseek_end",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "fseek_end".into(),
+                )
+            })?;
+        // ftell(fp) → file_size
+        let ftell_result = ctx
+            .builder()
+            .build_call(ftell_fn, &[fp_ptr.into()], "ftell")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ftell".into(),
+                )
+            })?;
+        let file_size = ftell_result
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ftell void".into(),
+                )
+            })?
+            .into_int_value();
+        // fseek(fp, 0, SEEK_SET) to rewind
+        let seek_set = i32_type.const_int(0, false);
+        ctx.builder()
+            .build_call(
+                fseek_fn,
+                &[fp_ptr.into(), zero_i64.into(), seek_set.into()],
+                "fseek_set",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "fseek_set".into(),
+                )
+            })?;
+        // malloc(file_size + 1)
+        let one_i64 = i64_type.const_int(1, false);
+        let alloc_size = ctx
+            .builder()
+            .build_int_add(file_size, one_i64, "alloc_size")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "alloc_size add failed".into(),
+                )
+            })?;
         let buf = ctx
             .builder()
-            .build_call(malloc_fn, &[buf_sz.into()], "fbuf")
+            .build_call(malloc_fn, &[alloc_size.into()], "fbuf")
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -682,10 +839,11 @@ impl IrBuilder {
                 )
             })?;
         let one = i64_type.const_int(1, false);
+        // fread(buf, 1, file_size, fp)
         ctx.builder()
             .build_call(
                 fread_fn,
-                &[buf_ptr.into(), one.into(), buf_sz.into(), fp_ptr.into()],
+                &[buf_ptr.into(), one.into(), file_size.into(), fp_ptr.into()],
                 "fread",
             )
             .map_err(|_| {
@@ -704,9 +862,10 @@ impl IrBuilder {
                     "fclose".into(),
                 )
             })?;
+        // null-terminate at buf[file_size]
         let null_pos = unsafe {
             ctx.builder()
-                .build_in_bounds_gep(buf_ptr, &[i64_type.const_int(65535, false)], "np")
+                .build_in_bounds_gep(buf_ptr, &[file_size], "np")
                 .map_err(|_| {
                     LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "gep".into())
                 })?
@@ -748,6 +907,84 @@ impl IrBuilder {
         let i64_type = context.i64_type();
         let i8_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
         let path_ptr = self.eval_string_arg(&args[0], ctx)?;
+        let strstr_fn = ctx.module().get_function("strstr").ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strstr not declared".into(),
+            )
+        })?;
+        let dotdot_gv = self.emit_string_global("..", ctx);
+        let dotdot_ptr = dotdot_gv.as_pointer_value().const_cast(i8_ptr_type);
+        let dotdot_result = ctx
+            .builder()
+            .build_call(
+                strstr_fn,
+                &[path_ptr.into(), dotdot_ptr.into()],
+                "wpath_dotdot",
+            )
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strstr dotdot failed".into(),
+                )
+            })?;
+        let dotdot_val = dotdot_result.try_as_basic_value().left().ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "strstr returned void".into(),
+            )
+        })?;
+        let dotdot_found = ctx
+            .builder()
+            .build_ptr_to_int(dotdot_val.into_pointer_value(), i64_type, "wdotdot_i64")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "ptr_to_int failed".into(),
+                )
+            })?;
+        let func = ctx
+            .builder()
+            .get_insert_block()
+            .and_then(|bb| bb.get_parent())
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "no function".into(),
+                )
+            })?;
+        let wpath_fail = context.append_basic_block(func, "wpath_trav_fail");
+        let wpath_ok = context.append_basic_block(func, "wpath_trav_ok");
+        let zero = i64_type.const_int(0, false);
+        let dotdot_present = ctx
+            .builder()
+            .build_int_compare(IntPredicate::NE, dotdot_found, zero, "wdotdot_present")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "compare failed".into(),
+                )
+            })?;
+        ctx.builder()
+            .build_conditional_branch(dotdot_present, wpath_fail, wpath_ok)
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "branch failed".into(),
+                )
+            })?;
+        ctx.builder().position_at_end(wpath_fail);
+        self.emit_puts("runtime error: path traversal blocked\n", ctx)?;
+        self.emit_abort(ctx);
+        let _ = ctx.builder().build_unreachable();
+        ctx.builder().position_at_end(wpath_ok);
         let content_ptr = self.eval_string_arg(&args[1], ctx)?;
         let fopen_fn = ctx.module().get_function("fopen").ok_or_else(|| {
             LeoError::new(
