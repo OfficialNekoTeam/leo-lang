@@ -1,3 +1,4 @@
+use crate::common::types::LeoType;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -5,7 +6,6 @@ use inkwell::module::Module;
 use inkwell::values::{FunctionValue, PointerValue};
 use std::collections::HashMap;
 
-/// Loop target for break/continue codegen
 pub struct LoopTarget<'ctx> {
     pub continue_block: BasicBlock<'ctx>,
     pub merge_block: BasicBlock<'ctx>,
@@ -13,17 +13,6 @@ pub struct LoopTarget<'ctx> {
 
 pub struct EnumDef {
     pub variants: Vec<String>,
-}
-
-/// Compile-time type tag for LLVM value tracking
-#[derive(Debug, Clone, PartialEq)]
-pub enum LeoType {
-    Int,
-    Float,
-    Bool,
-    Str,
-    Char,
-    Ptr,
 }
 
 pub struct LlvmContext<'ctx> {
@@ -34,11 +23,12 @@ pub struct LlvmContext<'ctx> {
     current_fn: Option<FunctionValue<'ctx>>,
     enums: HashMap<String, EnumDef>,
     types: HashMap<String, LeoType>,
+    fn_return_types: HashMap<String, LeoType>,
+    fn_param_types: HashMap<String, Vec<LeoType>>,
     pub loop_stack: Vec<LoopTarget<'ctx>>,
 }
 
 impl<'ctx> LlvmContext<'ctx> {
-    /// Create new LLVM context with empty module
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
@@ -50,58 +40,50 @@ impl<'ctx> LlvmContext<'ctx> {
             current_fn: None,
             enums: HashMap::new(),
             types: HashMap::new(),
+            fn_return_types: HashMap::new(),
+            fn_param_types: HashMap::new(),
             loop_stack: Vec::new(),
         }
     }
 
-    /// Get reference to module
     pub fn module(&self) -> &Module<'ctx> {
         &self.module
     }
 
-    /// Get mutable reference to module (needed for add_global etc.)
     pub fn module_mut(&mut self) -> &mut Module<'ctx> {
         &mut self.module
     }
 
-    /// Get reference to builder
     pub fn builder(&self) -> &Builder<'ctx> {
         &self.builder
     }
 
-    /// Register a function value by name
     pub fn register_function(&mut self, name: String, fv: FunctionValue<'ctx>) {
         self.functions.insert(name, fv);
     }
 
-    /// Look up function by name
     pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
         self.functions.get(name).copied()
     }
 
-    /// Store a variable's stack pointer by name
     pub fn register_variable(&mut self, name: String, ptr: PointerValue<'ctx>) {
         self.variables.insert(name, ptr);
     }
 
-    /// Look up variable stack pointer by name
     pub fn get_variable(&self, name: &str) -> Option<PointerValue<'ctx>> {
         self.variables.get(name).copied()
     }
 
-    /// Clear all local variables (called between function bodies)
     pub fn clear_variables(&mut self) {
         self.variables.clear();
         self.current_fn = None;
         self.types.clear();
     }
 
-    /// Set the currently-being-compiled function (for return type queries)
     pub fn set_current_fn(&mut self, fv: FunctionValue<'ctx>) {
         self.current_fn = Some(fv);
     }
 
-    /// Get the currently-being-compiled function
     pub fn current_fn(&self) -> Option<FunctionValue<'ctx>> {
         self.current_fn
     }
@@ -135,7 +117,26 @@ impl<'ctx> LlvmContext<'ctx> {
         self.types.clear();
     }
 
-    /// Write bitcode to file
+    pub fn register_fn_return_type(&mut self, name: String, ty: LeoType) {
+        self.fn_return_types.insert(name, ty);
+    }
+
+    pub fn get_fn_return_type(&self, name: &str) -> Option<&LeoType> {
+        self.fn_return_types.get(name)
+    }
+
+    pub fn register_fn_param_types(&mut self, name: String, types: Vec<LeoType>) {
+        self.fn_param_types.insert(name, types);
+    }
+
+    pub fn get_fn_param_types(&self, name: &str) -> Option<&Vec<LeoType>> {
+        self.fn_param_types.get(name)
+    }
+
+    pub fn is_string_var(&self, name: &str) -> bool {
+        self.types.get(name).map(|t| t.is_string()).unwrap_or(false)
+    }
+
     pub fn write_bitcode(&self, path: &str) -> Result<(), String> {
         self.module
             .write_bitcode_to_path(path.as_ref())
@@ -143,7 +144,6 @@ impl<'ctx> LlvmContext<'ctx> {
             .ok_or_else(|| format!("failed to write bitcode to {}", path))
     }
 
-    /// Print module IR to string
     pub fn print_module(&self) -> String {
         self.module.print_to_string().to_string()
     }

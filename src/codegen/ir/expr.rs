@@ -9,7 +9,7 @@ impl IrBuilder {
                 Ok(())
             }
             Expr::Ident(name, _) => {
-                if self.is_string_var(name, ctx) {
+                if ctx.is_string_var(name) {
                     let ptr = self.eval_string_arg(
                         &Expr::Ident(name.clone(), crate::common::span::Span::dummy()),
                         ctx,
@@ -35,17 +35,33 @@ impl IrBuilder {
         name: &str,
         ctx: &mut LlvmContext<'a>,
     ) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let i64_type = ctx.module().get_context().i64_type();
         if let Some(ptr) = ctx.get_variable(name) {
-            ctx.builder()
-                .build_load(ptr, name)
-                .map(|v| v.into_int_value())
-                .map_err(|_| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        format!("load failed for {}", name),
-                    )
-                })
+            let loaded = ctx.builder().build_load(ptr, name).map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    format!("load failed for {}", name),
+                )
+            })?;
+            match loaded {
+                BasicValueEnum::IntValue(iv) => Ok(iv),
+                BasicValueEnum::PointerValue(pv) => ctx
+                    .builder()
+                    .build_ptr_to_int(pv, i64_type, &format!("{}.as_i64", name))
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            format!("ptr_to_int failed for {}", name),
+                        )
+                    }),
+                other => Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    format!("unexpected type loading {}: {:?}", name, other),
+                )),
+            }
         } else if let Some(gv) = ctx.module().get_global(name) {
             let val = ctx
                 .builder()
@@ -57,7 +73,24 @@ impl IrBuilder {
                         format!("load const {} failed", name),
                     )
                 })?;
-            Ok(val.into_int_value())
+            match val {
+                BasicValueEnum::IntValue(iv) => Ok(iv),
+                BasicValueEnum::PointerValue(pv) => ctx
+                    .builder()
+                    .build_ptr_to_int(pv, i64_type, &format!("{}.as_i64", name))
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            format!("ptr_to_int failed for const {}", name),
+                        )
+                    }),
+                other => Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    format!("unexpected type loading const {}: {:?}", name, other),
+                )),
+            }
         } else {
             Err(LeoError::new(
                 ErrorKind::Syntax,
@@ -209,9 +242,19 @@ impl IrBuilder {
                     )
                 })?;
                 let mut arg_values: Vec<_> = Vec::new();
-                for arg in args {
+                let fn_param_types = ctx.get_fn_param_types(&func_name).cloned();
+                for (i, arg) in args.iter().enumerate() {
                     let val = self.eval_int(arg, ctx)?;
-                    arg_values.push(BasicValueEnum::from(val).into());
+                    let coerced = if let Some(ref ptypes) = fn_param_types {
+                        if let Some(param_type) = ptypes.get(i) {
+                            self.coerce_arg_to_type(val, param_type, ctx)?
+                        } else {
+                            BasicValueEnum::from(val)
+                        }
+                    } else {
+                        BasicValueEnum::from(val)
+                    };
+                    arg_values.push(coerced.into());
                 }
                 let call_site = ctx
                     .builder()
@@ -230,13 +273,152 @@ impl IrBuilder {
                         format!("{} returned void", func_name),
                     )
                 })?;
-                Ok(ret.into_int_value())
+                match ret {
+                    BasicValueEnum::IntValue(iv) => Ok(iv),
+                    BasicValueEnum::PointerValue(pv) => {
+                        let i64_type = ctx.module().get_context().i64_type();
+                        ctx.builder()
+                            .build_ptr_to_int(pv, i64_type, "call.as_i64")
+                            .map_err(|_| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    format!("ptr_to_int failed for call {}", func_name),
+                                )
+                            })
+                    }
+                    BasicValueEnum::FloatValue(fv) => {
+                        let i64_type = ctx.module().get_context().i64_type();
+                        let as_int = ctx
+                            .builder()
+                            .build_float_to_signed_int(fv, i64_type, "call.fptosi")
+                            .map_err(|_| {
+                                LeoError::new(
+                                    ErrorKind::Syntax,
+                                    ErrorCode::CodegenLLVMError,
+                                    format!("float_to_int failed for call {}", func_name),
+                                )
+                            })?;
+                        Ok(as_int)
+                    }
+                    _ => Err(LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        format!("unsupported return type from {}", func_name),
+                    )),
+                }
             }
             Expr::Select(obj, method, _) => self.eval_method_call(obj, method, args, ctx),
             _ => Err(LeoError::new(
                 ErrorKind::Syntax,
                 ErrorCode::CodegenLLVMError,
                 "only direct function calls supported".into(),
+            )),
+        }
+    }
+
+    fn coerce_arg_to_type<'a>(
+        &self,
+        val: inkwell::values::IntValue<'a>,
+        target_type: &LeoType,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<BasicValueEnum<'a>> {
+        let context = ctx.module().get_context();
+        match target_type {
+            LeoType::Str | LeoType::Ptr => {
+                let i8_ptr = context.i8_type().ptr_type(AddressSpace::default());
+                ctx.builder()
+                    .build_int_to_ptr(val, i8_ptr, "arg.as_ptr")
+                    .map(BasicValueEnum::from)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "int_to_ptr for arg failed".into(),
+                        )
+                    })
+            }
+            LeoType::F64 => {
+                let f64_type = context.f64_type();
+                ctx.builder()
+                    .build_signed_int_to_float(val, f64_type, "arg.as_f64")
+                    .map(BasicValueEnum::from)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "int_to_float for arg failed".into(),
+                        )
+                    })
+            }
+            LeoType::Bool | LeoType::Char => {
+                let target = if matches!(target_type, LeoType::Bool) {
+                    context.i8_type()
+                } else {
+                    context.i8_type()
+                };
+                let truncated = ctx
+                    .builder()
+                    .build_int_truncate(val, target, "arg.trunc")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "truncate arg failed".into(),
+                        )
+                    })?;
+                Ok(BasicValueEnum::from(truncated))
+            }
+            LeoType::I32 => {
+                let truncated = ctx
+                    .builder()
+                    .build_int_truncate(val, context.i32_type(), "arg.trunc32")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "truncate arg to i32 failed".into(),
+                        )
+                    })?;
+                Ok(BasicValueEnum::from(truncated))
+            }
+            _ => Ok(BasicValueEnum::from(val)),
+        }
+    }
+
+    fn basic_value_to_int<'a>(
+        &self,
+        val: BasicValueEnum<'a>,
+        name: &str,
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let i64_type = ctx.module().get_context().i64_type();
+        match val {
+            BasicValueEnum::IntValue(iv) => Ok(iv),
+            BasicValueEnum::PointerValue(pv) => ctx
+                .builder()
+                .build_ptr_to_int(pv, i64_type, "ret.as_i64")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        format!("ptr_to_int failed for {}", name),
+                    )
+                }),
+            BasicValueEnum::FloatValue(fv) => ctx
+                .builder()
+                .build_float_to_signed_int(fv, i64_type, "ret.fptosi")
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        format!("float_to_int failed for {}", name),
+                    )
+                }),
+            _ => Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!("unsupported return type from {}", name),
             )),
         }
     }
@@ -328,9 +510,19 @@ impl IrBuilder {
                             })?;
                             let obj_val = self.eval_int(obj, ctx)?;
                             let mut arg_values: Vec<BasicValueEnum> = vec![obj_val.into()];
-                            for arg in _args {
+                            let method_param_types = ctx.get_fn_param_types(&mangled).cloned();
+                            for (i, arg) in _args.iter().enumerate() {
                                 let val = self.eval_int(arg, ctx)?;
-                                arg_values.push(val.into());
+                                let coerced = if let Some(ref ptypes) = method_param_types {
+                                    if let Some(ptype) = ptypes.get(i + 1) {
+                                        self.coerce_arg_to_type(val, ptype, ctx)?
+                                    } else {
+                                        BasicValueEnum::from(val)
+                                    }
+                                } else {
+                                    BasicValueEnum::from(val)
+                                };
+                                arg_values.push(coerced);
                             }
                             let call_site = ctx
                                 .builder()
@@ -353,7 +545,7 @@ impl IrBuilder {
                                     format!("method {} returned void", mangled),
                                 )
                             })?;
-                            return Ok(ret.into_int_value());
+                            return self.basic_value_to_int(ret, &mangled, ctx);
                         }
                     }
                 }
@@ -418,8 +610,8 @@ impl IrBuilder {
         if !matches!(op, BinOp::Eq | BinOp::Ne) {
             return Ok(None);
         }
-        let left_is_str = self.expr_is_string(left);
-        let right_is_str = self.expr_is_string(right);
+        let left_is_str = self.expr_is_string(left, ctx);
+        let right_is_str = self.expr_is_string(right, ctx);
         if !left_is_str || !right_is_str {
             return Ok(None);
         }
@@ -499,8 +691,8 @@ impl IrBuilder {
         if !matches!(op, BinOp::Add) {
             return Ok(None);
         }
-        let left_is_str = self.expr_is_string(left);
-        let right_is_str = self.expr_is_string(right);
+        let left_is_str = self.expr_is_string(left, ctx);
+        let right_is_str = self.expr_is_string(right, ctx);
         if !left_is_str && !right_is_str {
             return Ok(None);
         }
@@ -721,22 +913,27 @@ impl IrBuilder {
         Ok(Some(result))
     }
 
-    pub(super) fn expr_is_string(&self, expr: &Expr) -> bool {
+    pub(super) fn expr_is_string(&self, expr: &Expr, ctx: &LlvmContext) -> bool {
         match expr {
             Expr::String(_, _) => true,
-            Expr::Ident(name, _) => self.string_vars.contains(name),
+            Expr::Ident(name, _) => ctx.is_string_var(name),
             Expr::Call(callee, _, _) => {
                 if let Expr::Ident(fn_name, _) = callee.as_ref() {
-                    matches!(
-                        fn_name.as_str(),
-                        "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read"
-                    )
+                    match fn_name.as_str() {
+                        "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read" => {
+                            true
+                        }
+                        _ => ctx
+                            .get_fn_return_type(fn_name)
+                            .map(|t| t.is_string())
+                            .unwrap_or(false),
+                    }
                 } else {
                     false
                 }
             }
             Expr::Binary(BinOp::Add, left, right, _) => {
-                self.expr_is_string(left) || self.expr_is_string(right)
+                self.expr_is_string(left, ctx) || self.expr_is_string(right, ctx)
             }
             Expr::Select(obj, field, _) => {
                 if let Expr::Ident(var_name, _) = obj.as_ref() {
@@ -988,19 +1185,10 @@ impl IrBuilder {
     }
 
     pub(super) fn is_string_var(&self, name: &str, ctx: &LlvmContext) -> bool {
-        use crate::llvm::context::LeoType;
-        if self.string_vars.contains(name) {
-            return true;
-        }
-        if let Some(ty) = ctx.get_type(name) {
-            return *ty == LeoType::Str;
-        }
-        false
+        ctx.is_string_var(name)
     }
 
-    /// Check if obj.field is a string-typed struct field
     fn select_is_string(&self, obj: &Expr, field: &str, ctx: &LlvmContext) -> bool {
-        use crate::llvm::context::LeoType;
         if let Expr::Ident(var_name, _) = obj {
             if let Some(struct_type) = self.var_types.get(var_name) {
                 if let Some(fields) = self.struct_fields.get(struct_type) {
@@ -1014,9 +1202,6 @@ impl IrBuilder {
                 }
             }
         }
-        if let Some(ty) = ctx.get_type(field) {
-            return *ty == LeoType::Str;
-        }
-        false
+        ctx.is_string_var(field)
     }
 }

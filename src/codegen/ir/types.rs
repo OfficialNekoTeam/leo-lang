@@ -7,7 +7,7 @@ impl IrBuilder {
         idx: &Expr,
         ctx: &mut LlvmContext<'a>,
     ) -> LeoResult<inkwell::values::IntValue<'a>> {
-        if self.expr_is_string(obj) {
+        if self.expr_is_string(obj, ctx) {
             return self.eval_string_index(obj, idx, ctx);
         }
         let obj_val = self.eval_int(obj, ctx)?;
@@ -1031,8 +1031,9 @@ impl IrBuilder {
                 ctx.register_variable(var_name.clone(), var_ptr);
                 if let Some(field_type) = payload_types.get(j) {
                     if field_type == "str" || field_type == "string" {
-                        self.string_vars.insert(var_name.clone());
-                        ctx.register_type(var_name.clone(), crate::llvm::context::LeoType::Str);
+                        ctx.register_type(var_name.clone(), LeoType::Str);
+                    } else {
+                        ctx.register_type(var_name.clone(), LeoType::from_str(field_type));
                     }
                 }
             }

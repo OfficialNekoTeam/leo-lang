@@ -104,11 +104,7 @@ impl IrBuilder {
         ctx: &mut LlvmContext,
     ) -> LeoResult<()> {
         let type_str = ty.as_deref().unwrap_or("i64");
-        let llvm_type = if type_str == "bool" {
-            ctx.module().get_context().i64_type().into()
-        } else {
-            Self::llvm_type(type_str, ctx)
-        };
+        let llvm_type = Self::llvm_type(type_str, ctx);
         let ptr = ctx.builder().build_alloca(llvm_type, name).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
@@ -130,37 +126,14 @@ impl IrBuilder {
                     }
                 }
                 Expr::String(s, _) => {
-                    self.string_vars.insert(name.to_string());
                     self.array_sizes.insert(name.to_string(), s.len() as u32);
                 }
                 Expr::StructInit(struct_name, _, _) => {
                     self.var_types.insert(name.to_string(), struct_name.clone());
                 }
-                Expr::Binary(BinOp::Add, left, right, _) => {
-                    if self.expr_is_string(left) || self.expr_is_string(right) {
-                        self.string_vars.insert(name.to_string());
-                    }
-                }
-                Expr::Call(callee, _, _) => {
-                    if let Expr::Ident(fn_name, _) = callee.as_ref() {
-                        if matches!(
-                            fn_name.as_str(),
-                            "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read"
-                        ) {
-                            self.string_vars.insert(name.to_string());
-                        }
-                    }
-                    if type_str == "str" {
-                        self.string_vars.insert(name.to_string());
-                    }
-                }
-                _ => {
-                    if type_str == "str" {
-                        self.string_vars.insert(name.to_string());
-                    }
-                }
+                _ => {}
             }
-            let inferred_type = self.infer_type(expr, type_str);
+            let inferred_type = self.infer_type_with_ctx(expr, type_str, ctx);
             ctx.register_type(name.to_string(), inferred_type);
             let val = self.eval_expr_to_value(expr, ctx)?;
             ctx.builder().build_store(ptr, val).map_err(|_| {
@@ -170,11 +143,13 @@ impl IrBuilder {
                     format!("store failed for {}", name),
                 )
             })?;
+        } else {
+            let leo_type = LeoType::from_str(type_str);
+            ctx.register_type(name.to_string(), leo_type);
         }
         Ok(())
     }
 
-    /// Build assignment: load value, store into existing variable
     pub(super) fn build_assign(
         &mut self,
         name: &str,
@@ -196,8 +171,14 @@ impl IrBuilder {
                 format!("store failed for {}", name),
             )
         })?;
-        let inferred = self.infer_type(expr, "");
-        if inferred != crate::llvm::context::LeoType::Ptr && !self.string_vars.contains(name) {
+        let existing_type = ctx.get_type(name).cloned();
+        if let Some(et) = existing_type {
+            if et.is_string() {
+                return Ok(());
+            }
+        }
+        let inferred = self.infer_type_with_ctx(expr, "", ctx);
+        if !matches!(inferred, LeoType::Struct(_)) {
             ctx.register_type(name.to_string(), inferred);
         }
         Ok(())
@@ -425,7 +406,7 @@ impl IrBuilder {
         })?;
         ctx.register_variable(var.to_string(), var_ptr);
 
-        let len_val = if self.expr_is_string(iter) {
+        let len_val = if self.expr_is_string(iter, ctx) {
             let str_ptr = self.eval_string_arg(iter, ctx)?;
             let strlen_fn = ctx.module().get_function("strlen").ok_or_else(|| {
                 LeoError::new(
@@ -473,7 +454,7 @@ impl IrBuilder {
             ));
         };
 
-        let is_string_iter = self.expr_is_string(iter);
+        let is_string_iter = self.expr_is_string(iter, ctx);
 
         let cond_block = context.append_basic_block(function, "for.cond");
         let body_block = context.append_basic_block(function, "for.body");
@@ -719,56 +700,44 @@ impl IrBuilder {
         ))
     }
 
-    fn infer_type(&self, expr: &Expr, type_str: &str) -> crate::llvm::context::LeoType {
-        use crate::llvm::context::LeoType;
-        if type_str == "str" {
-            return LeoType::Str;
-        }
-        if type_str == "bool" {
-            return LeoType::Bool;
-        }
-        if type_str == "f64" {
-            return LeoType::Float;
-        }
-        if type_str == "char" {
-            return LeoType::Char;
+    fn infer_type_with_ctx(&self, expr: &Expr, type_str: &str, ctx: &LlvmContext) -> LeoType {
+        let declared = LeoType::from_str(type_str);
+        if type_str != "i64" {
+            return declared;
         }
         match expr {
             Expr::String(_, _) => LeoType::Str,
-            Expr::Number(_, _) => LeoType::Int,
+            Expr::Number(_, _) => LeoType::I64,
             Expr::Bool(_, _) => LeoType::Bool,
             Expr::Char(_, _) => LeoType::Char,
-            Expr::Float(_, _) => LeoType::Float,
+            Expr::Float(_, _) => LeoType::F64,
             Expr::Call(callee, _, _) => {
                 if let Expr::Ident(fn_name, _) = callee.as_ref() {
                     match fn_name.as_str() {
                         "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read" => {
                             LeoType::Str
                         }
-                        "is_digit" | "is_alpha" | "is_alnum" => LeoType::Int,
-                        _ => LeoType::Int,
+                        "is_digit" | "is_alpha" | "is_alnum" => LeoType::Bool,
+                        _ => ctx
+                            .get_fn_return_type(fn_name)
+                            .cloned()
+                            .unwrap_or(LeoType::I64),
                     }
                 } else {
-                    LeoType::Int
+                    LeoType::I64
                 }
             }
             Expr::Binary(BinOp::Add, left, right, _) => {
-                if self.expr_is_string(left) || self.expr_is_string(right) {
+                if self.expr_is_string(left, ctx) || self.expr_is_string(right, ctx) {
                     LeoType::Str
                 } else {
-                    LeoType::Int
+                    LeoType::I64
                 }
             }
             Expr::StructInit(_, _, _) => LeoType::Ptr,
             Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => LeoType::Ptr,
-            Expr::Ident(name, _) => {
-                if self.string_vars.contains(name) {
-                    LeoType::Str
-                } else {
-                    LeoType::Int
-                }
-            }
-            _ => LeoType::Int,
+            Expr::Ident(name, _) => ctx.get_type(name).cloned().unwrap_or(LeoType::I64),
+            _ => LeoType::I64,
         }
     }
 }
