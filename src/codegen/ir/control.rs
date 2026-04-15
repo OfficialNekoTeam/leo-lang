@@ -150,6 +150,9 @@ impl IrBuilder {
                             self.string_vars.insert(name.to_string());
                         }
                     }
+                    if type_str == "str" {
+                        self.string_vars.insert(name.to_string());
+                    }
                 }
                 _ => {
                     if type_str == "str" {
@@ -194,7 +197,7 @@ impl IrBuilder {
             )
         })?;
         let inferred = self.infer_type(expr, "");
-        if inferred != crate::llvm::context::LeoType::Ptr {
+        if inferred != crate::llvm::context::LeoType::Ptr && !self.string_vars.contains(name) {
             ctx.register_type(name.to_string(), inferred);
         }
         Ok(())

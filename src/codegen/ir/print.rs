@@ -397,6 +397,11 @@ impl IrBuilder {
                     })?;
                 Ok(ptr)
             }
+            Expr::Ident(name, _) => Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!("'{}' is not a string variable", name),
+            )),
             Expr::Select(_, _, _) | Expr::Call(_, _, _) | Expr::Binary(_, _, _, _) => {
                 let val = self.eval_int(expr, ctx)?;
                 let ptr = ctx

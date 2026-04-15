@@ -166,10 +166,16 @@ impl IrBuilder {
             }
             Stmt::Impl(struct_name, _trait, methods, _) => {
                 for method in methods {
-                    if let Stmt::Function(name, params, ret, body, _span) = method {
+                    if let Stmt::Function(name, params, _, _, _) = method {
                         let mangled = format!("{}_{}", struct_name, name);
                         self.methods
                             .insert((struct_name.clone(), name.clone()), mangled.clone());
+                        Self::declare_fn(&mangled, params, ctx);
+                    }
+                }
+                for method in methods {
+                    if let Stmt::Function(name, params, ret, body, _span) = method {
+                        let mangled = format!("{}_{}", struct_name, name);
                         self.build_fn(&mangled, params, ret, body, ctx)?;
                     }
                 }
@@ -177,6 +183,25 @@ impl IrBuilder {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Declare LLVM function stub (params + type, no body) for forward references
+    fn declare_fn(name: &str, params: &[(String, String)], ctx: &mut LlvmContext) {
+        if ctx.module().get_function(name).is_some() {
+            return;
+        }
+        let context = ctx.module().get_context();
+        let is_main = name == "main";
+        let param_types: Vec<BasicTypeEnum> =
+            params.iter().map(|_| context.i64_type().into()).collect();
+        let param_meta: Vec<_> = param_types.iter().map(|t| (*t).into()).collect();
+        let fn_type = if is_main {
+            context.i32_type().fn_type(&param_meta, false)
+        } else {
+            context.i64_type().fn_type(&param_meta, false)
+        };
+        let fv = ctx.module_mut().add_function(name, fn_type, None);
+        ctx.register_function(name.to_string(), fv);
     }
 
     /// Build LLVM function with params, return type, and body
@@ -192,17 +217,17 @@ impl IrBuilder {
         let context = ctx.module().get_context();
         let is_main = name == "main";
 
+        Self::declare_fn(name, params, ctx);
+        let function = ctx.get_function(name).ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!("function {} not found after declare", name),
+            )
+        })?;
+
         let param_types: Vec<BasicTypeEnum> =
             params.iter().map(|_| context.i64_type().into()).collect();
-        let param_meta: Vec<_> = param_types.iter().map(|t| (*t).into()).collect();
-
-        let fn_type = if is_main {
-            context.i32_type().fn_type(&param_meta, false)
-        } else {
-            context.i64_type().fn_type(&param_meta, false)
-        };
-
-        let function = ctx.module_mut().add_function(name, fn_type, None);
 
         // Auto-inline small functions (≤3 body statements, not main)
         if !is_main && body.len() <= 3 {

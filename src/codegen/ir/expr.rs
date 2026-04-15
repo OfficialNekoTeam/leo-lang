@@ -989,10 +989,13 @@ impl IrBuilder {
 
     pub(super) fn is_string_var(&self, name: &str, ctx: &LlvmContext) -> bool {
         use crate::llvm::context::LeoType;
+        if self.string_vars.contains(name) {
+            return true;
+        }
         if let Some(ty) = ctx.get_type(name) {
             return *ty == LeoType::Str;
         }
-        self.string_vars.contains(name)
+        false
     }
 
     /// Check if obj.field is a string-typed struct field
