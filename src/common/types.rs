@@ -31,7 +31,18 @@ impl LeoType {
             "char" => LeoType::Char,
             "str" | "string" => LeoType::Str,
             "unit" | "void" => LeoType::Unit,
-            other => LeoType::Struct(other.to_string()),
+            other => {
+                // Vec<T> pattern
+                if let Some(inner) = other.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
+                    return LeoType::Vec(Box::new(LeoType::from_str(inner)));
+                }
+                // Single uppercase letter → TypeVar (e.g. "T", "U")
+                let bytes = other.as_bytes();
+                if bytes.len() == 1 && bytes[0].is_ascii_uppercase() {
+                    return LeoType::TypeVar(other.to_string());
+                }
+                LeoType::Struct(other.to_string())
+            }
         }
     }
 
@@ -117,5 +128,62 @@ impl fmt::Display for LeoType {
                 write!(f, ">")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_str_primitives() {
+        assert_eq!(LeoType::from_str("i64"), LeoType::I64);
+        assert_eq!(LeoType::from_str("f64"), LeoType::F64);
+        assert_eq!(LeoType::from_str("bool"), LeoType::Bool);
+        assert_eq!(LeoType::from_str("char"), LeoType::Char);
+        assert_eq!(LeoType::from_str("str"), LeoType::Str);
+        assert_eq!(LeoType::from_str("unit"), LeoType::Unit);
+    }
+
+    #[test]
+    fn test_from_str_vec() {
+        assert_eq!(
+            LeoType::from_str("Vec<i64>"),
+            LeoType::Vec(Box::new(LeoType::I64))
+        );
+        assert_eq!(
+            LeoType::from_str("Vec<str>"),
+            LeoType::Vec(Box::new(LeoType::Str))
+        );
+    }
+
+    #[test]
+    fn test_from_str_typevar() {
+        assert_eq!(LeoType::from_str("T"), LeoType::TypeVar("T".into()));
+        assert_eq!(LeoType::from_str("U"), LeoType::TypeVar("U".into()));
+    }
+
+    #[test]
+    fn test_from_str_struct() {
+        assert_eq!(
+            LeoType::from_str("Point"),
+            LeoType::Struct("Point".into())
+        );
+    }
+
+    #[test]
+    fn test_display_roundtrip() {
+        let ty = LeoType::Vec(Box::new(LeoType::I64));
+        assert_eq!(format!("{}", ty), "Vec<i64>");
+        let ty2 = LeoType::Array(Box::new(LeoType::Bool), 3);
+        assert_eq!(format!("{}", ty2), "[bool; 3]");
+    }
+
+    #[test]
+    fn test_is_pointer() {
+        assert!(LeoType::Struct("Foo".into()).is_pointer());
+        assert!(LeoType::Vec(Box::new(LeoType::I64)).is_pointer());
+        assert!(LeoType::Str.is_pointer());
+        assert!(!LeoType::I64.is_pointer());
     }
 }

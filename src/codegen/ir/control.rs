@@ -735,8 +735,18 @@ impl IrBuilder {
                     LeoType::I64
                 }
             }
-            Expr::StructInit(_, _, _, _) => LeoType::Ptr,
-            Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => LeoType::Ptr,
+            Expr::StructInit(name, _, _, _) => LeoType::Struct(name.clone()),
+            Expr::Array(elems, _) => {
+                LeoType::Array(Box::new(LeoType::I64), elems.len())
+            }
+            Expr::ArrayRepeat(_, count, _) => {
+                let size = if let Expr::Number(n, _) = count.as_ref() {
+                    *n as usize
+                } else {
+                    0
+                };
+                LeoType::Array(Box::new(LeoType::I64), size)
+            }
             Expr::Ident(name, _) => ctx.get_type(name).cloned().unwrap_or(LeoType::I64),
             _ => LeoType::I64,
         }

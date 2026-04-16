@@ -142,25 +142,32 @@ impl IrBuilder {
             }
             Expr::Index(obj, idx, _) => {
                 let val = self.eval_index(obj, idx, ctx)?;
-                // FIXME: Proper type inference for index
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::I64))
+                let elem_ty = self.infer_index_type(obj, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), elem_ty))
             }
             Expr::Select(obj, field, _) => {
                 let val = self.eval_select(obj, field, ctx)?;
-                // FIXME: Proper type inference for select
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::I64))
+                let field_ty = self.infer_select_type(obj, field, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), field_ty))
             }
             Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => {
                 let val = self.eval_array_alloc(expr, ctx)?;
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::Ptr)) // Should be Array(..)
+                let arr_ty = self.infer_array_type(expr, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), arr_ty))
             }
-            Expr::StructInit(_, _, _, _) => {
+            Expr::StructInit(name, _, type_args, _) => {
                 let val = self.eval_struct_init(expr, ctx)?;
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::Ptr)) // Should be Struct(..)
+                let struct_ty = if !type_args.is_empty() {
+                    LeoType::Struct(Self::mangle_generic_name(name, type_args))
+                } else {
+                    LeoType::Struct(name.clone())
+                };
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), struct_ty))
             }
             Expr::Match(scrutinee, arms, _) => {
                 let val = self.eval_match(scrutinee, arms, ctx)?;
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::I64)) // FIXME
+                let match_ty = self.infer_match_type(arms, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), match_ty))
             }
             _ => Err(LeoError::new(
                 ErrorKind::Syntax,
@@ -657,5 +664,143 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
             }
         }
         ctx.is_string_var(field)
+    }
+
+    /// Infer the element type of an index expression (arr[i] or s[i]).
+    fn infer_index_type(&self, obj: &Expr, ctx: &LlvmContext) -> LeoType {
+        if self.expr_is_string(obj, ctx) {
+            return LeoType::Char;
+        }
+        if let Expr::Ident(name, _) = obj {
+            if let Some(ty) = ctx.get_type(name) {
+                return match ty {
+                    LeoType::Array(elem, _) => *elem.clone(),
+                    LeoType::Vec(elem) => *elem.clone(),
+                    LeoType::Str => LeoType::Char,
+                    _ => LeoType::I64,
+                };
+            }
+        }
+        LeoType::I64
+    }
+
+    /// Infer the type of a field access (obj.field).
+    fn infer_select_type(
+        &self,
+        obj: &Expr,
+        field: &str,
+        _ctx: &LlvmContext,
+    ) -> LeoType {
+        if field == "len" {
+            return LeoType::I64;
+        }
+        if let Expr::Ident(var_name, _) = obj {
+            if let Some(struct_name) = self.var_types.get(var_name) {
+                if let Some(field_types) = self.struct_field_types.get(struct_name) {
+                    if let Some(fields) = self.struct_fields.get(struct_name) {
+                        if let Some(idx) = fields.iter().position(|f| f == field) {
+                            if let Some(ty_str) = field_types.get(idx) {
+                                return LeoType::from_str(ty_str);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        LeoType::I64
+    }
+
+    /// Infer the return type of a match expression from its first arm body.
+    fn infer_match_type(
+        &self,
+        arms: &[(Expr, Expr)],
+        ctx: &LlvmContext,
+    ) -> LeoType {
+        if let Some((_pattern, body)) = arms.first() {
+            return self.infer_expr_type(body, ctx);
+        }
+        LeoType::I64
+    }
+
+    /// Infer the type of an array literal or array repeat expression.
+    fn infer_array_type(
+        &self,
+        expr: &Expr,
+        ctx: &LlvmContext,
+    ) -> LeoType {
+        match expr {
+            Expr::Array(elems, _) => {
+                let elem_ty = if let Some(first) = elems.first() {
+                    self.infer_expr_type(first, ctx)
+                } else {
+                    LeoType::I64
+                };
+                LeoType::Array(Box::new(elem_ty), elems.len())
+            }
+            Expr::ArrayRepeat(val, count, _) => {
+                let elem_ty = self.infer_expr_type(val, ctx);
+                let size = if let Expr::Number(n, _) = count.as_ref() {
+                    *n as usize
+                } else {
+                    0
+                };
+                LeoType::Array(Box::new(elem_ty), size)
+            }
+            _ => LeoType::Ptr,
+        }
+    }
+
+    /// Lightweight type inference for an expression (no code generation).
+    fn infer_expr_type(
+        &self,
+        expr: &Expr,
+        ctx: &LlvmContext,
+    ) -> LeoType {
+        match expr {
+            Expr::Number(_, _) => LeoType::I64,
+            Expr::Float(_, _) => LeoType::F64,
+            Expr::Bool(_, _) => LeoType::Bool,
+            Expr::Char(_, _) => LeoType::Char,
+            Expr::String(_, _) => LeoType::Str,
+            Expr::Ident(name, _) => {
+                ctx.get_type(name).cloned().unwrap_or(LeoType::I64)
+            }
+            Expr::Call(callee, _, _, _) => {
+                if let Expr::Ident(fn_name, _) = callee.as_ref() {
+                    ctx.get_fn_return_type(fn_name)
+                        .cloned()
+                        .unwrap_or(LeoType::I64)
+                } else {
+                    LeoType::I64
+                }
+            }
+            Expr::Binary(op, left, right, _) => {
+                match op {
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt
+                    | BinOp::Le | BinOp::Gt | BinOp::Ge => LeoType::Bool,
+                    BinOp::And | BinOp::Or => LeoType::Bool,
+                    BinOp::Add => {
+                        if self.expr_is_string(left, ctx)
+                            || self.expr_is_string(right, ctx)
+                        {
+                            LeoType::Str
+                        } else {
+                            LeoType::I64
+                        }
+                    }
+                    _ => LeoType::I64,
+                }
+            }
+            Expr::StructInit(name, _, _, _) => LeoType::Struct(name.clone()),
+            Expr::Array(elems, _) => {
+                let elem_ty = if let Some(first) = elems.first() {
+                    self.infer_expr_type(first, ctx)
+                } else {
+                    LeoType::I64
+                };
+                LeoType::Array(Box::new(elem_ty), elems.len())
+            }
+            _ => LeoType::I64,
+        }
     }
 }
