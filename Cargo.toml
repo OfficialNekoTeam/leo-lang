@@ -2,6 +2,7 @@
 name = "leo"
 version = "0.17.1"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 inkwell = { version = "0.5", features = ["llvm14-0"] }
