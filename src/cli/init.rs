@@ -43,7 +43,6 @@ pub fn init(name: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_init_new_project() {

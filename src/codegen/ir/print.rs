@@ -63,16 +63,16 @@ impl IrBuilder {
                     if let Some(printf) = ctx.module().get_function("printf") {
                         ctx.builder()
                             .build_call(printf, &[fmt_ptr.into(), ptr.into()], "print_str_nn")
-                            .ok();
+                            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "printf fail".into()))?;
                     }
                 }
             }
             _ => {
                 let val = self.eval_int(expr, ctx)?;
                 if newline {
-                    self.emit_print_int(val, ctx)
+                    self.emit_print_int(val, ctx)?
                 } else {
-                    self.emit_print_int_no_newline(val, ctx)
+                    self.emit_print_int_no_newline(val, ctx)?
                 }
             }
         }
@@ -90,7 +90,7 @@ impl IrBuilder {
             _ => "panic".to_string(),
         };
         self.emit_puts(&format!("PANIC: {}", msg), ctx)?;
-        self.emit_abort(ctx);
+        self.emit_abort(ctx)?;
         Ok(ctx.module().get_context().i64_type().const_int(1, false))
     }
 
@@ -147,7 +147,7 @@ impl IrBuilder {
             _ => "Assertion failed".to_string(),
         };
         self.emit_puts(&msg, ctx)?;
-        self.emit_abort(ctx);
+        self.emit_abort(ctx)?;
         let _ = ctx.builder().build_unreachable();
 
         ctx.builder().position_at_end(pass_block);
@@ -155,13 +155,14 @@ impl IrBuilder {
     }
 
     /// Emit abort() call (for panic/assert)
-    pub(super) fn emit_abort(&mut self, ctx: &mut LlvmContext) {
+    pub(super) fn emit_abort(&mut self, ctx: &mut LlvmContext) -> LeoResult<()> {
         let abort_fn = ctx.module().get_function("abort").unwrap_or_else(|| {
             let void_type = ctx.module().get_context().void_type();
             ctx.module_mut()
                 .add_function("abort", void_type.fn_type(&[], false), None)
         });
-        ctx.builder().build_call(abort_fn, &[], "abort").ok();
+        ctx.builder().build_call(abort_fn, &[], "abort").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "abort".into()))?;
+        Ok(())
     }
 
     /// Runtime NULL check after malloc/realloc/fopen.
@@ -209,7 +210,7 @@ impl IrBuilder {
             })?;
         ctx.builder().position_at_end(fail_block);
         self.emit_puts(msg, ctx)?;
-        self.emit_abort(ctx);
+        self.emit_abort(ctx)?;
         let _ = ctx.builder().build_unreachable();
         ctx.builder().position_at_end(ok_block);
         Ok(())
@@ -259,7 +260,7 @@ impl IrBuilder {
             })?;
         ctx.builder().position_at_end(fail_block);
         self.emit_puts(msg, ctx)?;
-        self.emit_abort(ctx);
+        self.emit_abort(ctx)?;
         let _ = ctx.builder().build_unreachable();
         ctx.builder().position_at_end(ok_block);
         Ok(())
@@ -309,7 +310,7 @@ impl IrBuilder {
             })?;
         ctx.builder().position_at_end(fail_block);
         self.emit_puts(msg, ctx)?;
-        self.emit_abort(ctx);
+        self.emit_abort(ctx)?;
         let _ = ctx.builder().build_unreachable();
         ctx.builder().position_at_end(ok_block);
         Ok(())
@@ -359,7 +360,7 @@ impl IrBuilder {
             })?;
         ctx.builder().position_at_end(fail_block);
         self.emit_puts(msg, ctx)?;
-        self.emit_abort(ctx);
+        self.emit_abort(ctx)?;
         let _ = ctx.builder().build_unreachable();
         ctx.builder().position_at_end(ok_block);
         Ok(())
@@ -384,17 +385,12 @@ impl IrBuilder {
                 Ok(ptr)
             }
             Expr::Ident(name, _) if self.is_string_var(name, ctx) => {
-                let i64_val = self.load_ident(name, ctx)?;
-                let ptr = ctx
-                    .builder()
-                    .build_int_to_ptr(i64_val, i8_ptr_type, "str_var_ptr")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "int_to_ptr for string var failed".into(),
-                        )
-                    })?;
+                let tv = self.load_ident(name, ctx)?;
+                let ptr = if tv.value.is_pointer_value() {
+                    tv.value.into_pointer_value()
+                } else {
+                    ctx.builder().build_int_to_ptr(tv.value.into_int_value(), i8_ptr_type, "str_var_ptr").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "int_to_ptr str_var failed".into()))?
+                };
                 Ok(ptr)
             }
             Expr::Ident(name, _) => Err(LeoError::new(
@@ -449,7 +445,7 @@ impl IrBuilder {
         &mut self,
         val: inkwell::values::IntValue<'a>,
         ctx: &mut LlvmContext<'a>,
-    ) {
+    ) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let fmt = "%ld\0".to_string();
         let gv = ctx.module_mut().add_global(
@@ -465,8 +461,9 @@ impl IrBuilder {
         if let Some(printf) = ctx.module().get_function("printf") {
             ctx.builder()
                 .build_call(printf, &[ptr.into(), val.into()], "print_int_nn")
-                .ok();
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "printf fail".into()))?;
         }
+        Ok(())
     }
 
     /// Emit printf for string literal without newline
@@ -497,7 +494,7 @@ impl IrBuilder {
         if let Some(printf) = ctx.module().get_function("printf") {
             ctx.builder()
                 .build_call(printf, &[fmt_ptr.into(), str_ptr.into()], "print_str")
-                .ok();
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "printf fail".into()))?;
         }
         Ok(())
     }
@@ -507,7 +504,7 @@ impl IrBuilder {
         &mut self,
         val: inkwell::values::IntValue<'a>,
         ctx: &mut LlvmContext<'a>,
-    ) {
+    ) -> LeoResult<()> {
         let context = ctx.module().get_context();
         let fmt = format!("%ld\n\0");
         let gv = ctx.module_mut().add_global(
@@ -523,8 +520,9 @@ impl IrBuilder {
         if let Some(printf) = ctx.module().get_function("printf") {
             ctx.builder()
                 .build_call(printf, &[ptr.into(), val.into()], "print_int")
-                .ok();
+                .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "printf fail".into()))?;
         }
+        Ok(())
     }
 
     /// Emit puts(string) for string literal

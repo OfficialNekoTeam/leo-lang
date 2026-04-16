@@ -1,19 +1,24 @@
-use crate::ast::expr::{BinOp, Expr, UnOp};
+use crate::ast::expr::{BinOp, Expr};
 use crate::ast::stmt::Stmt;
 use crate::common::types::LeoType;
 use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::llvm::context::LlvmContext;
-use inkwell::attributes::AttributeLoc;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use std::collections::HashMap;
 
+mod builtins;
 mod control;
 mod core;
+mod enum_;
 mod expr;
+mod file_io;
+mod func;
+mod ops;
 mod print;
+mod str_util;
 mod string;
 mod tests;
 mod types;

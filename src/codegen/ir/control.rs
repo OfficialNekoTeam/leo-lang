@@ -24,8 +24,8 @@ impl IrBuilder {
                 self.build_for(var, iter, body, ctx)?;
             }
             Stmt::Return(Some(expr), _) => {
-                let val = self.eval_expr_to_value(expr, ctx)?;
-                self.build_return_with(val, ctx)?;
+                let tv = self.eval_expr(expr, ctx)?;
+                self.build_return_with(tv.value, ctx)?;
             }
             Stmt::Return(None, _) => {
                 let context = ctx.module().get_context();
@@ -135,8 +135,8 @@ impl IrBuilder {
             }
             let inferred_type = self.infer_type_with_ctx(expr, type_str, ctx);
             ctx.register_type(name.to_string(), inferred_type);
-            let val = self.eval_expr_to_value(expr, ctx)?;
-            ctx.builder().build_store(ptr, val).map_err(|_| {
+            let tv = self.eval_expr(expr, ctx)?;
+            ctx.builder().build_store(ptr, tv.value).map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
                     ErrorCode::CodegenLLVMError,
@@ -163,8 +163,8 @@ impl IrBuilder {
                 format!("undefined variable: {}", name),
             )
         })?;
-        let val = self.eval_expr_to_value(expr, ctx)?;
-        ctx.builder().build_store(ptr, val).map_err(|_| {
+        let tv = self.eval_expr(expr, ctx)?;
+            ctx.builder().build_store(ptr, tv.value).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
                 ErrorCode::CodegenLLVMError,
@@ -644,7 +644,8 @@ impl IrBuilder {
         let i64_type = ctx.module().get_context().i64_type();
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
         let obj_val = self.eval_int(obj, ctx)?;
-        let rhs_val = self.eval_expr_to_value(expr, ctx)?;
+        let tv = self.eval_expr(expr, ctx)?;
+        let rhs_val = tv.value;
         let obj_ptr = ctx
             .builder()
             .build_int_to_ptr(obj_val, i64_ptr_type, "fassign_ptr")

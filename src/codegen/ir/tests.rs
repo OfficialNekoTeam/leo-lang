@@ -36,8 +36,8 @@ mod tests {
         builder.build(&stmts, &mut ctx).expect("build");
         let ir = ctx.print_module();
         assert!(
-            ir.contains("inttoptr"),
-            "string index should use inttoptr for string var"
+            !ir.contains("inttoptr"),
+            "string index should natively use pointer without inttoptr"
         );
     }
 
@@ -98,8 +98,8 @@ mod tests {
         builder.build(&stmts, &mut ctx).expect("build");
         let ir = ctx.print_module();
         assert!(
-            ir.contains("ptrtoint") || ir.contains("inttoptr"),
-            "string should be stored as i64 pointer"
+            !ir.contains("inttoptr"),
+            "string should be stored natively as a pointer"
         );
     }
 
