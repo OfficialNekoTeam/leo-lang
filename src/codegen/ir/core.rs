@@ -316,8 +316,11 @@ impl IrBuilder {
     pub fn leo_type_to_llvm<'ctx>(leo: &LeoType, ctx: &LlvmContext<'ctx>) -> BasicTypeEnum<'ctx> {
         let context = ctx.module().get_context();
         match leo {
-            LeoType::I64 => context.i64_type().into(),
-            LeoType::I32 => context.i32_type().into(),
+            LeoType::I8 | LeoType::U8 => context.i8_type().into(),
+            LeoType::I16 | LeoType::U16 => context.i16_type().into(),
+            LeoType::I32 | LeoType::U32 => context.i32_type().into(),
+            LeoType::I64 | LeoType::U64 => context.i64_type().into(),
+            LeoType::F32 => context.f32_type().into(),
             LeoType::F64 => context.f64_type().into(),
             LeoType::Bool => context.bool_type().into(),
             LeoType::Char => context.i8_type().into(),
@@ -351,6 +354,10 @@ impl IrBuilder {
             }
             LeoType::Fn(_, _) => context.i8_type().ptr_type(AddressSpace::default()).into(),
             LeoType::Unit => context.struct_type(&[], false).into(),
+            LeoType::Never => {
+                // Never type — use void-like empty struct
+                context.struct_type(&[], false).into()
+            }
             LeoType::TypeVar(_) => {
                 // Unresolved type var defaults to i64 at codegen time
                 context.i64_type().into()
