@@ -102,27 +102,52 @@ impl IrBuilder {
 
     pub(super) fn build_stmt(&mut self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
         match stmt {
-            Stmt::Function(name, params, ret, body, _)
-            | Stmt::AsyncFunction(name, params, ret, body, _) => {
-                self.build_fn(name, params, ret, body, ctx)?;
+            Stmt::Function(name, params, ret, body, type_params, _)
+            | Stmt::AsyncFunction(name, params, ret, body, type_params, _) => {
+                if !type_params.is_empty() {
+                    // Store generic function definition for later instantiation
+                    self.generic_fns.insert(
+                        name.clone(),
+                        super::mono::GenericFnDef {
+                            type_params: type_params.clone(),
+                            params: params.clone(),
+                            ret: ret.clone(),
+                            body: body.clone(),
+                        },
+                    );
+                } else {
+                    self.build_fn(name, params, ret, body, ctx)?;
+                }
             }
             Stmt::Const(name, ty, expr, _span) => {
                 self.build_const(name, ty, expr, ctx)?;
             }
-            Stmt::Struct(name, fields, _) => {
-                let context = ctx.module().get_context();
-                let struct_type = context.opaque_struct_type(name);
-                let field_types: Vec<BasicTypeEnum> = fields
-                    .iter()
-                    .map(|(_, ty)| Self::llvm_type(ty, ctx))
-                    .collect();
-                struct_type.set_body(&field_types, false);
-                let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-                let field_type_names: Vec<String> =
-                    fields.iter().map(|(_, ty)| ty.clone()).collect();
-                self.struct_fields.insert(name.clone(), field_names);
-                self.struct_field_types
-                    .insert(name.clone(), field_type_names);
+            Stmt::Struct(name, fields, type_params, _) => {
+                if !type_params.is_empty() {
+                    // Store generic struct definition for later instantiation
+                    self.generic_structs.insert(
+                        name.clone(),
+                        super::mono::GenericStructDef {
+                            type_params: type_params.clone(),
+                            fields: fields.clone(),
+                        },
+                    );
+                } else {
+                    let context = ctx.module().get_context();
+                    let struct_type = context.opaque_struct_type(name);
+                    let field_types: Vec<BasicTypeEnum> = fields
+                        .iter()
+                        .map(|(_, ty)| Self::llvm_type(ty, ctx))
+                        .collect();
+                    struct_type.set_body(&field_types, false);
+                    let field_names: Vec<String> =
+                        fields.iter().map(|(n, _)| n.clone()).collect();
+                    let field_type_names: Vec<String> =
+                        fields.iter().map(|(_, ty)| ty.clone()).collect();
+                    self.struct_fields.insert(name.clone(), field_names);
+                    self.struct_field_types
+                        .insert(name.clone(), field_type_names);
+                }
             }
             Stmt::Enum(name, variants, _) => {
                 let context = ctx.module().get_context();
@@ -162,9 +187,9 @@ impl IrBuilder {
                     self.enum_payload_types.insert(qualified, types);
                 }
             }
-            Stmt::Impl(struct_name, _trait, methods, _) => {
+            Stmt::Impl(struct_name, _trait, methods, _, _) => {
                 for method in methods {
-                    if let Stmt::Function(name, params, ret, _, _) = method {
+                    if let Stmt::Function(name, params, ret, _, _, _) = method {
                         let mangled = format!("{}_{}", struct_name, name);
                         self.methods
                             .insert((struct_name.clone(), name.clone()), mangled.clone());
@@ -172,7 +197,7 @@ impl IrBuilder {
                     }
                 }
                 for method in methods {
-                    if let Stmt::Function(name, params, ret, body, _span) = method {
+                    if let Stmt::Function(name, params, ret, body, _, _span) = method {
                         let mangled = format!("{}_{}", struct_name, name);
                         self.build_fn(&mangled, params, ret, body, ctx)?;
                     }
@@ -326,6 +351,18 @@ impl IrBuilder {
             }
             LeoType::Fn(_, _) => context.i8_type().ptr_type(AddressSpace::default()).into(),
             LeoType::Unit => context.struct_type(&[], false).into(),
+            LeoType::TypeVar(_) => {
+                // Unresolved type var defaults to i64 at codegen time
+                context.i64_type().into()
+            }
+            LeoType::Generic(name, _args) => {
+                // Look up the monomorphized struct by name
+                if let Some(st) = ctx.module().get_struct_type(name) {
+                    st.ptr_type(AddressSpace::default()).into()
+                } else {
+                    context.i8_type().ptr_type(AddressSpace::default()).into()
+                }
+            }
         }
     }
 }

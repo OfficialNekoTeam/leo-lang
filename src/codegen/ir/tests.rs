@@ -169,4 +169,82 @@ mod tests {
             "for-in string should load chars with zext"
         );
     }
+
+    #[test]
+    fn test_generic_fn_ir() {
+        let source = r#"
+fn identity<T>(x: T) -> T {
+    return x
+}
+fn main() {
+    println(identity<i64>(42))
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_generic_fn");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("identity_i64"),
+            "generic fn should be monomorphized to identity_i64"
+        );
+    }
+
+    #[test]
+    fn test_generic_fn_two_types_ir() {
+        let source = r#"
+fn first<T>(a: T, b: T) -> T {
+    return a
+}
+fn main() {
+    println(first<i64>(1, 2))
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_generic_fn_two");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("first_i64"),
+            "generic fn should be monomorphized to first_i64"
+        );
+    }
+
+    #[test]
+    fn test_generic_struct_ir() {
+        let source = r#"
+struct Pair<T> {
+    first: T,
+    second: T,
+}
+fn main() {
+    let p = Pair<i64> { first: 1, second: 2 }
+    println(p)
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_generic_struct");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        // Verify the monomorphized struct was registered in field metadata
+        assert!(
+            builder.struct_fields.contains_key("Pair_i64"),
+            "generic struct should be monomorphized — struct_fields should contain Pair_i64"
+        );
+        let fields = builder.struct_fields.get("Pair_i64").unwrap();
+        assert_eq!(fields, &["first", "second"]);
+        // Verify the LLVM struct type was created
+        assert!(
+            ctx.module().get_struct_type("Pair_i64").is_some(),
+            "LLVM module should have Pair_i64 struct type"
+        );
+    }
 }

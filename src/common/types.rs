@@ -15,6 +15,10 @@ pub enum LeoType {
     Enum(String),
     Fn(Vec<LeoType>, Box<LeoType>),
     Unit,
+    /// Unresolved type parameter, e.g. T in fn max<T>
+    TypeVar(String),
+    /// Instantiated generic, e.g. Stack<i64>
+    Generic(String, Vec<LeoType>),
 }
 
 impl LeoType {
@@ -70,6 +74,8 @@ impl LeoType {
             LeoType::Struct(_) => 0,
             LeoType::Enum(_) => 0,
             LeoType::Fn(_, _) => 0,
+            LeoType::TypeVar(_) => 8,
+            LeoType::Generic(_, _) => 0,
         }
     }
 }
@@ -98,6 +104,17 @@ impl fmt::Display for LeoType {
                     write!(f, "{}", p)?;
                 }
                 write!(f, ") -> {}", ret)
+            }
+            LeoType::TypeVar(name) => write!(f, "{}", name),
+            LeoType::Generic(name, args) => {
+                write!(f, "{}<", name)?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", a)?;
+                }
+                write!(f, ">")
             }
         }
     }

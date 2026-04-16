@@ -80,6 +80,17 @@ impl<'ctx> LlvmContext<'ctx> {
         self.types.clear();
     }
 
+    /// Save variables and types for later restore (used by monomorphization)
+    pub fn save_variables(&self) -> (HashMap<String, PointerValue<'ctx>>, HashMap<String, LeoType>) {
+        (self.variables.clone(), self.types.clone())
+    }
+
+    /// Restore previously saved variables and types
+    pub fn restore_variables(&mut self, saved: (HashMap<String, PointerValue<'ctx>>, HashMap<String, LeoType>)) {
+        self.variables = saved.0;
+        self.types = saved.1;
+    }
+
     pub fn set_current_fn(&mut self, fv: FunctionValue<'ctx>) {
         self.current_fn = Some(fv);
     }

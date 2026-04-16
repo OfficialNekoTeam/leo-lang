@@ -11,12 +11,14 @@ pub enum Expr {
     Unit(Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Unary(UnOp, Box<Expr>, Span),
-    Call(Box<Expr>, Vec<Expr>, Span),
+    /// Call(callee, args, type_args, span)
+    Call(Box<Expr>, Vec<Expr>, Vec<String>, Span),
     Index(Box<Expr>, Box<Expr>, Span),
     Select(Box<Expr>, String, Span),
     Array(Vec<Expr>, Span),
     ArrayRepeat(Box<Expr>, Box<Expr>, Span),
-    StructInit(String, Vec<(String, Expr)>, Span),
+    /// StructInit(name, fields, type_args, span)
+    StructInit(String, Vec<(String, Expr)>, Vec<String>, Span),
     Lambda(Vec<(String, String)>, Box<Expr>, Span),
     If(Box<Expr>, Box<Expr>, Option<Box<Expr>>, Span),
     Block(Vec<Expr>, Span),

@@ -128,7 +128,7 @@ impl IrBuilder {
                 Expr::String(s, _) => {
                     self.array_sizes.insert(name.to_string(), s.len() as u32);
                 }
-                Expr::StructInit(struct_name, _, _) => {
+                Expr::StructInit(struct_name, _, _, _) => {
                     self.var_types.insert(name.to_string(), struct_name.clone());
                 }
                 _ => {}
@@ -712,7 +712,7 @@ impl IrBuilder {
             Expr::Bool(_, _) => LeoType::Bool,
             Expr::Char(_, _) => LeoType::Char,
             Expr::Float(_, _) => LeoType::F64,
-            Expr::Call(callee, _, _) => {
+            Expr::Call(callee, _, _, _) => {
                 if let Expr::Ident(fn_name, _) = callee.as_ref() {
                     match fn_name.as_str() {
                         "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read" => {
@@ -735,7 +735,7 @@ impl IrBuilder {
                     LeoType::I64
                 }
             }
-            Expr::StructInit(_, _, _) => LeoType::Ptr,
+            Expr::StructInit(_, _, _, _) => LeoType::Ptr,
             Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => LeoType::Ptr,
             Expr::Ident(name, _) => ctx.get_type(name).cloned().unwrap_or(LeoType::I64),
             _ => LeoType::I64,

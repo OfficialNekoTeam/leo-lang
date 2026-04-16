@@ -10,7 +10,7 @@ impl IrBuilder {
     pub(super) fn eval_and_emit(&mut self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
         match expr {
             Expr::String(s, _) => self.emit_puts(s, ctx),
-            Expr::Call(_, _, _) | Expr::Match(_, _, _) => {
+            Expr::Call(_, _, _, _) | Expr::Match(_, _, _) => {
                 let _ = self.eval_int(expr, ctx)?;
                 Ok(())
             }
@@ -120,7 +120,18 @@ impl IrBuilder {
                 let val = self.eval_expr(e, ctx)?;
                 self.emit_unop(op, val, ctx)
             }
-            Expr::Call(callee, args, _) => {
+            Expr::Call(callee, args, type_args, _) => {
+                if !type_args.is_empty() {
+                    if let Expr::Ident(name, span) = callee.as_ref() {
+                        if self.generic_fns.contains_key(name) {
+                            let mangled = self.instantiate_generic_fn(
+                                name, type_args, ctx,
+                            )?;
+                            let mangled_callee = Expr::Ident(mangled, *span);
+                            return self.eval_call(&mangled_callee, args, ctx);
+                        }
+                    }
+                }
                 self.eval_call(callee, args, ctx)
             }
             Expr::String(s, _) => {
@@ -143,7 +154,7 @@ impl IrBuilder {
                 let val = self.eval_array_alloc(expr, ctx)?;
                 Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::Ptr)) // Should be Array(..)
             }
-            Expr::StructInit(_, _, _) => {
+            Expr::StructInit(_, _, _, _) => {
                 let val = self.eval_struct_init(expr, ctx)?;
                 Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::Ptr)) // Should be Struct(..)
             }
@@ -562,7 +573,7 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
         match expr {
             Expr::String(_, _) => true,
             Expr::Ident(name, _) => ctx.is_string_var(name),
-            Expr::Call(callee, _, _) => {
+            Expr::Call(callee, _, _, _) => {
                 if let Expr::Ident(fn_name, _) = callee.as_ref() {
                     match fn_name.as_str() {
                         "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read" => {
@@ -609,7 +620,7 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
                 .get_type(name)
                 .map(|t| matches!(t, LeoType::F64))
                 .unwrap_or(false),
-            Expr::Call(callee, _, _) => {
+            Expr::Call(callee, _, _, _) => {
                 if let Expr::Ident(fn_name, _) = callee.as_ref() {
                     ctx.get_fn_return_type(fn_name)
                         .map(|t| matches!(t, LeoType::F64))

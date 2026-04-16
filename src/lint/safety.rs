@@ -43,12 +43,12 @@ impl SafetyLinter {
                     Self::lint_stmt(s, errors);
                 }
             }
-            Stmt::Function(_, _, _, body, _) | Stmt::AsyncFunction(_, _, _, body, _) => {
+            Stmt::Function(_, _, _, body, _, _) | Stmt::AsyncFunction(_, _, _, body, _, _) => {
                 for s in body {
                     Self::lint_stmt(s, errors);
                 }
             }
-            Stmt::Impl(_, _, methods, _) => {
+            Stmt::Impl(_, _, methods, _, _) => {
                 for m in methods {
                     Self::lint_stmt(m, errors);
                 }
@@ -88,7 +88,7 @@ impl SafetyLinter {
                 Self::lint_expr(left, errors);
                 Self::lint_expr(right, errors);
             }
-            Expr::Call(callee, args, _) => {
+            Expr::Call(callee, args, _, _) => {
                 Self::lint_expr(callee, errors);
                 for a in args {
                     Self::lint_expr(a, errors);

@@ -16,6 +16,7 @@ mod enum_;
 mod expr;
 mod file_io;
 mod func;
+mod mono;
 mod ops;
 mod print;
 mod str_util;
@@ -32,6 +33,8 @@ pub struct IrBuilder {
     pub(super) var_types: HashMap<String, String>,
     pub(super) methods: HashMap<(String, String), String>,
     pub(super) enum_payload_types: HashMap<String, Vec<String>>,
+    pub(super) generic_fns: HashMap<String, mono::GenericFnDef>,
+    pub(super) generic_structs: HashMap<String, mono::GenericStructDef>,
 }
 
 impl IrBuilder {
@@ -44,6 +47,8 @@ impl IrBuilder {
             var_types: HashMap::new(),
             methods: HashMap::new(),
             enum_payload_types: HashMap::new(),
+            generic_fns: HashMap::new(),
+            generic_structs: HashMap::new(),
         }
     }
 
@@ -54,6 +59,8 @@ impl IrBuilder {
         self.var_types.clear();
         self.methods.clear();
         self.enum_payload_types.clear();
+        self.generic_fns.clear();
+        self.generic_structs.clear();
         self.declare_c_runtime(ctx);
         for stmt in stmts {
             self.build_stmt(stmt, ctx)?;

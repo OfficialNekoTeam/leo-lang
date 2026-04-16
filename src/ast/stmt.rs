@@ -11,18 +11,22 @@ pub enum Stmt {
     If(Vec<(Expr, Vec<Stmt>)>, Option<Vec<Stmt>>, Span),
     While(Expr, Vec<Stmt>, Span),
     For(String, Expr, Vec<Stmt>, Span),
+    /// Function(name, params, ret, body, type_params, span)
     Function(
         String,
         Vec<(String, String)>,
         Option<String>,
         Vec<Stmt>,
+        Vec<String>,
         Span,
     ),
+    /// AsyncFunction(name, params, ret, body, type_params, span)
     AsyncFunction(
         String,
         Vec<(String, String)>,
         Option<String>,
         Vec<Stmt>,
+        Vec<String>,
         Span,
     ),
     Return(Option<Expr>, Span),
@@ -31,10 +35,12 @@ pub enum Stmt {
     Import(String, Option<Vec<String>>, Span),
     FromImport(String, Vec<String>, Span),
     Module(String, Vec<Stmt>, Span),
-    Struct(String, Vec<(String, String)>, Span),
+    /// Struct(name, fields, type_params, span)
+    Struct(String, Vec<(String, String)>, Vec<String>, Span),
     Enum(String, Vec<(String, Vec<Expr>)>, Span),
     Trait(String, Vec<(String, Vec<Stmt>)>, Span),
-    Impl(String, Option<String>, Vec<Stmt>, Span),
+    /// Impl(name, trait_name, methods, type_params, span)
+    Impl(String, Option<String>, Vec<Stmt>, Vec<String>, Span),
     Pub(Box<Stmt>),
     Const(String, String, Expr, Span),
 }
@@ -94,9 +100,10 @@ mod tests {
             params,
             Some("i32".to_string()),
             vec![],
+            vec![],
             Span::dummy(),
         );
-        assert!(matches!(stmt, Stmt::Function(_, _, _, _, _)));
+        assert!(matches!(stmt, Stmt::Function(..)));
     }
 
     #[test]
@@ -121,8 +128,8 @@ mod tests {
     #[test]
     fn test_stmt_struct() {
         let fields = vec![("x".to_string(), "i32".to_string())];
-        let stmt = Stmt::Struct("Foo".to_string(), fields, Span::dummy());
-        assert!(matches!(stmt, Stmt::Struct(_, _, _)));
+        let stmt = Stmt::Struct("Foo".to_string(), fields, vec![], Span::dummy());
+        assert!(matches!(stmt, Stmt::Struct(..)));
     }
 
     #[test]
@@ -137,5 +144,43 @@ mod tests {
         let inner = Box::new(Stmt::Expr(Expr::Number(1, Span::dummy())));
         let stmt = Stmt::Pub(inner);
         assert!(matches!(stmt, Stmt::Pub(_)));
+    }
+
+    #[test]
+    fn test_stmt_generic_fn() {
+        let params = vec![("a".to_string(), "T".to_string())];
+        let type_params = vec!["T".to_string()];
+        let stmt = Stmt::Function(
+            "max".to_string(),
+            params,
+            Some("T".to_string()),
+            vec![],
+            type_params,
+            Span::dummy(),
+        );
+        if let Stmt::Function(name, _, _, _, tparams, _) = &stmt {
+            assert_eq!(name, "max");
+            assert_eq!(tparams, &["T".to_string()]);
+        } else {
+            panic!("expected Function");
+        }
+    }
+
+    #[test]
+    fn test_stmt_generic_struct() {
+        let fields = vec![("data".to_string(), "T".to_string())];
+        let type_params = vec!["T".to_string()];
+        let stmt = Stmt::Struct(
+            "Stack".to_string(),
+            fields,
+            type_params,
+            Span::dummy(),
+        );
+        if let Stmt::Struct(name, _, tparams, _) = &stmt {
+            assert_eq!(name, "Stack");
+            assert_eq!(tparams, &["T".to_string()]);
+        } else {
+            panic!("expected Struct");
+        }
     }
 }

@@ -283,11 +283,12 @@ impl Parser {
         Ok(Stmt::Let(name, ty, init))
     }
 
-    /// Parse function: fn name(params) [-> Type] { body }
+    /// Parse function: fn name[<T, U>](params) [-> Type] { body }
     fn parse_fn(&mut self, is_async: bool) -> LeoResult<Stmt> {
         let start = self.cur_span();
         self.advance();
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect_sym(Symbol::LeftParen)?;
         let params = self.parse_params()?;
         self.expect_sym(Symbol::RightParen)?;
@@ -299,9 +300,9 @@ impl Parser {
         let body = self.parse_block()?;
         let span = self.merge(start, self.prev_span());
         if is_async {
-            Ok(Stmt::AsyncFunction(name, params, ret, body, span))
+            Ok(Stmt::AsyncFunction(name, params, ret, body, type_params, span))
         } else {
-            Ok(Stmt::Function(name, params, ret, body, span))
+            Ok(Stmt::Function(name, params, ret, body, type_params, span))
         }
     }
 
@@ -321,6 +322,73 @@ impl Parser {
             }
         }
         Ok(params)
+    }
+
+    /// Parse optional type parameter list: `<T, U, ...>`
+    /// Used in definitions: `fn name<T>`, `struct Name<T>`, `impl<T>`
+    fn parse_type_params(&mut self) -> LeoResult<Vec<String>> {
+        if !self.is_sym(Symbol::Less) {
+            return Ok(vec![]);
+        }
+        self.advance(); // consume <
+        let mut params = Vec::new();
+        loop {
+            if self.is_sym(Symbol::Greater) {
+                break;
+            }
+            params.push(self.expect_ident()?);
+            if !self.match_sym(Symbol::Comma) {
+                break;
+            }
+        }
+        self.expect_sym(Symbol::Greater)?;
+        Ok(params)
+    }
+
+    /// Try to parse type arguments at call-site: `<i64, str>`
+    /// Uses lookahead: saves position, tries to parse, restores on failure.
+    /// Returns None if the `<` is actually a comparison operator.
+    fn try_parse_type_args(&mut self) -> Option<Vec<String>> {
+        if !self.is_sym(Symbol::Less) {
+            return None;
+        }
+        let saved = self.pos;
+        self.advance(); // consume <
+        let mut args = Vec::new();
+        loop {
+            if self.is_sym(Symbol::Greater) {
+                break;
+            }
+            // Must be an identifier (type name)
+            match self.peek() {
+                Some(t) => match &t.token {
+                    Token::Identifier(n) => {
+                        args.push(n.clone());
+                        self.advance();
+                    }
+                    _ => {
+                        self.pos = saved;
+                        return None;
+                    }
+                },
+                None => {
+                    self.pos = saved;
+                    return None;
+                }
+            }
+            if !self.match_sym(Symbol::Comma) {
+                break;
+            }
+        }
+        if !self.match_sym(Symbol::Greater) {
+            self.pos = saved;
+            return None;
+        }
+        if args.is_empty() {
+            self.pos = saved;
+            return None;
+        }
+        Some(args)
     }
 
     /// Parse block: { stmt* }
@@ -484,11 +552,12 @@ impl Parser {
         ))
     }
 
-    /// Parse struct: struct Name { field: Type, ... }
+    /// Parse struct: struct Name[<T>] { field: Type, ... }
     fn parse_struct(&mut self) -> LeoResult<Stmt> {
         let start = self.cur_span();
         self.advance();
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect_sym(Symbol::LeftBrace)?;
         let mut fields = Vec::new();
         while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
@@ -502,14 +571,16 @@ impl Parser {
         Ok(Stmt::Struct(
             name,
             fields,
+            type_params,
             self.merge(start, self.prev_span()),
         ))
     }
 
-    /// Parse impl block: impl StructName { fn method(...) { ... } ... }
+    /// Parse impl block: impl[<T>] StructName { fn method(...) { ... } ... }
     fn parse_impl(&mut self) -> LeoResult<Stmt> {
         let start = self.cur_span();
         self.advance();
+        let type_params = self.parse_type_params()?;
         let name = self.expect_ident()?;
         let trait_name = if self.match_sym(Symbol::Colon) {
             Some(self.expect_ident()?)
@@ -529,6 +600,7 @@ impl Parser {
             name,
             trait_name,
             methods,
+            type_params,
             self.merge(start, self.prev_span()),
         ))
     }
@@ -544,6 +616,29 @@ impl Parser {
     fn parse_prec(&mut self, min: u8) -> LeoResult<Expr> {
         let mut left = self.parse_unary()?;
         loop {
+            // Lookahead: if left is Ident and next is `<`, try type args
+            if let Expr::Ident(_, _) = &left {
+                if self.is_sym(Symbol::Less) {
+                    if let Some(type_args) = self.try_parse_type_args() {
+                        // Must be followed by ( for a call
+                        if self.match_sym(Symbol::LeftParen) {
+                            let mut args = Vec::new();
+                            while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                                args.push(self.parse_expr()?);
+                                self.match_sym(Symbol::Comma);
+                            }
+                            self.expect_sym(Symbol::RightParen)?;
+                            left = Expr::Call(
+                                Box::new(left),
+                                args,
+                                type_args,
+                                Span::dummy(),
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
             let Some((op, prec)) = self.peek_binop() else {
                 break;
             };
@@ -595,10 +690,25 @@ impl Parser {
         self.parse_postfix()
     }
 
-    /// Parse postfix: call(), .field, [index]
+    /// Parse postfix: call(), .field, [index], type_args<T>
     fn parse_postfix(&mut self) -> LeoResult<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
+            // Try type args: ident<type>(args)
+            if let Expr::Ident(_, _) = &expr {
+                if let Some(type_args) = self.try_parse_type_args() {
+                    if self.match_sym(Symbol::LeftParen) {
+                        let mut args = Vec::new();
+                        while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                            args.push(self.parse_expr()?);
+                            self.match_sym(Symbol::Comma);
+                        }
+                        self.expect_sym(Symbol::RightParen)?;
+                        expr = Expr::Call(Box::new(expr), args, type_args, Span::dummy());
+                        continue;
+                    }
+                }
+            }
             if self.match_sym(Symbol::LeftParen) {
                 let mut args = Vec::new();
                 while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
@@ -606,7 +716,7 @@ impl Parser {
                     self.match_sym(Symbol::Comma);
                 }
                 self.expect_sym(Symbol::RightParen)?;
-                expr = Expr::Call(Box::new(expr), args, Span::dummy());
+                expr = Expr::Call(Box::new(expr), args, vec![], Span::dummy());
             } else if self.match_sym(Symbol::Dot) {
                 let name = self.expect_ident()?;
                 expr = Expr::Select(Box::new(expr), name, Span::dummy());
@@ -656,10 +766,20 @@ impl Parser {
                 let name = n.clone();
                 let name_span = span;
                 self.advance();
+                // Check Name<T> { ... } struct init with type args
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    let saved = self.pos;
+                    let type_args = self.try_parse_type_args().unwrap_or_default();
+                    if self.is_sym(Symbol::LeftBrace) {
+                        return self.parse_struct_init_with_args(name, type_args, name_span);
+                    }
+                    // No struct init — revert type_args parsing
+                    self.pos = saved;
+                }
                 if self.is_sym(Symbol::LeftBrace)
                     && name.chars().next().map_or(false, |c| c.is_uppercase())
                 {
-                    return self.parse_struct_init(name, name_span);
+                    return self.parse_struct_init_with_args(name, vec![], name_span);
                 }
                 Ok(Expr::Ident(name, name_span))
             }
@@ -715,7 +835,12 @@ impl Parser {
         Ok(Expr::Array(elements, start))
     }
 
-    fn parse_struct_init(&mut self, name: String, start: Span) -> LeoResult<Expr> {
+    fn parse_struct_init_with_args(
+        &mut self,
+        name: String,
+        type_args: Vec<String>,
+        start: Span,
+    ) -> LeoResult<Expr> {
         self.expect_sym(Symbol::LeftBrace)?;
         let mut fields = Vec::new();
         while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
@@ -726,7 +851,7 @@ impl Parser {
             self.match_sym(Symbol::Comma);
         }
         self.expect_sym(Symbol::RightBrace)?;
-        Ok(Expr::StructInit(name, fields, start))
+        Ok(Expr::StructInit(name, fields, type_args, start))
     }
 
     fn parse_enum_decl(&mut self) -> LeoResult<Stmt> {
@@ -799,6 +924,7 @@ impl Parser {
                         return Ok(Expr::Call(
                             Box::new(Expr::Ident(format!("{}::{}", name, variant), span)),
                             bindings,
+                            vec![],
                             span,
                         ));
                     }
@@ -904,7 +1030,7 @@ mod tests {
     fn test_parse_impl() {
         let stmts = parse_src("impl Foo { fn bar(self: Foo) -> i64 { return 1 } }");
         assert!(
-            matches!(&stmts[0], Stmt::Impl(name, _, methods, _) if name == "Foo" && methods.len() == 1)
+            matches!(&stmts[0], Stmt::Impl(name, _, methods, _, _) if name == "Foo" && methods.len() == 1)
         );
     }
 
@@ -935,11 +1061,65 @@ mod tests {
     #[test]
     fn test_parse_self_in_fn() {
         let stmts = parse_src("fn get(self: Point) -> i64 { return self.x }");
-        if let Stmt::Function(name, params, _, _, _) = &stmts[0] {
+        if let Stmt::Function(name, params, _, _, _, _) = &stmts[0] {
             assert_eq!(name, "get");
             assert_eq!(params[0].0, "self");
         } else {
             panic!("expected Function");
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_fn() {
+        let stmts = parse_src("fn max<T>(a: T, b: T) -> T { return a }");
+        if let Stmt::Function(name, params, ret, _, tparams, _) = &stmts[0] {
+            assert_eq!(name, "max");
+            assert_eq!(tparams, &["T".to_string()]);
+            assert_eq!(params.len(), 2);
+            assert_eq!(ret.as_deref(), Some("T"));
+        } else {
+            panic!("expected Function");
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_struct() {
+        let stmts = parse_src("struct Stack<T> { data: T, len: i64 }");
+        if let Stmt::Struct(name, fields, tparams, _) = &stmts[0] {
+            assert_eq!(name, "Stack");
+            assert_eq!(tparams, &["T".to_string()]);
+            assert_eq!(fields.len(), 2);
+        } else {
+            panic!("expected Struct");
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_impl() {
+        let stmts = parse_src("impl<T> Stack { fn push(self: Stack, val: T) { } }");
+        if let Stmt::Impl(name, _, methods, tparams, _) = &stmts[0] {
+            assert_eq!(name, "Stack");
+            assert_eq!(tparams, &["T".to_string()]);
+            assert_eq!(methods.len(), 1);
+        } else {
+            panic!("expected Impl");
+        }
+    }
+
+    #[test]
+    fn test_parse_generic_struct_init() {
+        let stmts = parse_src("let p = Pair<i64> { first: 1, second: 2 }");
+        if let Stmt::Let(name, _, Some(init)) = &stmts[0] {
+            assert_eq!(name, "p");
+            if let Expr::StructInit(sname, fields, type_args, _) = init {
+                assert_eq!(sname, "Pair");
+                assert_eq!(type_args, &["i64".to_string()]);
+                assert_eq!(fields.len(), 2);
+            } else {
+                panic!("expected StructInit, got {:?}", init);
+            }
+        } else {
+            panic!("expected Let with StructInit");
         }
     }
 }

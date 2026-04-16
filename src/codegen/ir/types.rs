@@ -561,7 +561,15 @@ impl IrBuilder {
         let i64_type = context.i64_type();
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
         match expr {
-            Expr::StructInit(_name, fields, _) => {
+            Expr::StructInit(name, fields, type_args, _) => {
+                // If this is a generic struct with type args, instantiate it
+                let _effective_name = if !type_args.is_empty()
+                    && self.generic_structs.contains_key(name)
+                {
+                    self.instantiate_generic_struct(name, type_args, ctx)?
+                } else {
+                    name.clone()
+                };
                 let total_size = i64_type.const_int(fields.len() as u64 * 8, false);
                 let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
                     LeoError::new(

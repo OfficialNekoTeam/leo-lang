@@ -156,7 +156,7 @@ impl IrBuilder {
             })?;
         let is_enum_match = arms.iter().any(|(pat, _)| match pat {
             Expr::Ident(name, _) => name.contains("::"),
-            Expr::Call(callee, _, _) => {
+            Expr::Call(callee, _, _, _) => {
                 matches!(callee.as_ref(), Expr::Ident(n, _) if n.contains("::"))
             }
             _ => false,
@@ -220,7 +220,7 @@ impl IrBuilder {
                         }
                     }
                 }
-                Expr::Call(callee, _, _) => {
+                Expr::Call(callee, _, _, _) => {
                     if let Expr::Ident(name, _) = callee.as_ref() {
                         if name.contains("::") {
                             let parts: Vec<&str> = name.split("::").collect();
@@ -283,7 +283,7 @@ impl IrBuilder {
         scrut_val: inkwell::values::IntValue<'a>,
         ctx: &mut LlvmContext<'a>,
     ) -> LeoResult<()> {
-        if let Expr::Call(callee, bindings, _) = pattern {
+        if let Expr::Call(callee, bindings, _, _) = pattern {
             if let Expr::Ident(name, _) = callee.as_ref() {
                 if name.contains("::") {
                     let parts: Vec<&str> = name.split("::").collect();

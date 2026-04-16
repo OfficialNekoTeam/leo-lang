@@ -62,7 +62,7 @@ impl Checker {
                 }
                 self.check_expr(pattern)?;
             }
-            Expr::Call(callee, args, _) => {
+            Expr::Call(callee, args, _, _) => {
                 self.check_pattern(callee)?;
                 // Enum destructuring: args like Number(n) are variable bindings
                 if let Expr::Ident(name, _) = callee.as_ref() {
@@ -104,13 +104,13 @@ impl Checker {
             Stmt::If(branches, els, _) => self.check_if(branches, els)?,
             Stmt::While(cond, body, _) => self.check_while(cond, body)?,
             Stmt::For(name, iter, body, _) => self.check_for(name, iter, body)?,
-            Stmt::Function(name, params, ret, body, _)
-            | Stmt::AsyncFunction(name, params, ret, body, _) => {
+            Stmt::Function(name, params, ret, body, _, _)
+            | Stmt::AsyncFunction(name, params, ret, body, _, _) => {
                 self.functions.insert(name.clone());
                 self.fn_params.insert(name.clone(), params.len());
                 self.check_fn(name, params, ret, body)?;
             }
-            Stmt::Struct(name, fields, _) => self.check_struct(name, fields)?,
+            Stmt::Struct(name, fields, _, _) => self.check_struct(name, fields)?,
             Stmt::Import(_, _, _) | Stmt::FromImport(_, _, _) => {}
             Stmt::Module(_, body, _) => {
                 self.check(body)?;
@@ -120,9 +120,9 @@ impl Checker {
                 self.constants.insert(name.clone());
             }
             Stmt::Trait(_, _, _) => {}
-            Stmt::Impl(struct_name, _trait_name, methods, _) => {
+            Stmt::Impl(struct_name, _trait_name, methods, _, _) => {
                 for method in methods {
-                    if let Stmt::Function(name, params, ret, body, _) = method {
+                    if let Stmt::Function(name, params, ret, body, _, _) = method {
                         let mangled = format!("{}_{}", struct_name, name);
                         self.functions.insert(mangled.clone());
                         self.fn_params.insert(mangled.clone(), params.len());
@@ -276,7 +276,7 @@ impl Checker {
             }
             Expr::Binary(op, left, right, _) => self.check_binary(op, left, right),
             Expr::Unary(op, e, _) => self.check_unary(op, e),
-            Expr::Call(callee, args, _) => self.check_call(callee, args),
+            Expr::Call(callee, args, _, _) => self.check_call(callee, args),
             Expr::Index(obj, idx, _) => self.check_index(obj, idx),
             Expr::Select(_, _, _) => Ok("unknown".to_string()),
             Expr::Array(elements, _) => {
@@ -290,7 +290,7 @@ impl Checker {
                 self.check_expr(count)?;
                 Ok("array".to_string())
             }
-            Expr::StructInit(name, fields, _) => {
+            Expr::StructInit(name, fields, _, _) => {
                 for (_, val) in fields {
                     self.check_expr(val)?;
                 }
@@ -508,6 +508,7 @@ mod tests {
             "add".into(),
             vec![("a".into(), "i32".into())],
             Some("i32".into()),
+            vec![],
             vec![],
             Span::dummy(),
         );
