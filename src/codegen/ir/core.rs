@@ -11,10 +11,10 @@ impl IrBuilder {
         let i32_type = ctx.module().get_context().i32_type();
         let void_type = ctx.module().get_context().void_type();
         ctx.module_mut()
-            .add_function("puts", i8_ptr.fn_type(&[], false), None);
+            .add_function("puts", i32_type.fn_type(&[i8_ptr.into()], false), None);
         ctx.module_mut().add_function(
             "printf",
-            i32_type.fn_type(&[i8_ptr.into(), i64_type.into()], true),
+            i32_type.fn_type(&[i8_ptr.into()], true),
             None,
         );
         ctx.module_mut()

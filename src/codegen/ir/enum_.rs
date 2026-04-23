@@ -202,6 +202,27 @@ impl IrBuilder {
             scrut_val
         };
         let merge_block = context.append_basic_block(function, "match.merge");
+        // Alloca for collecting match arm result values
+        let result_ptr = ctx
+            .builder()
+            .build_alloca(i64_type, "match_result")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "match result alloca failed".into(),
+                )
+            })?;
+        // Default value: 0 (safe fallback when no arm matches and no _ arm)
+        ctx.builder()
+            .build_store(result_ptr, i64_type.const_int(0, false))
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "match result init store failed".into(),
+                )
+            })?;
         let mut cases: Vec<(inkwell::values::IntValue, inkwell::basic_block::BasicBlock)> =
             Vec::new();
         let mut arm_blocks: Vec<(inkwell::basic_block::BasicBlock, &Expr)> = Vec::new();
@@ -264,8 +285,16 @@ impl IrBuilder {
             if is_enum_match {
                 self.bind_match_payload(pattern, scrut_val, ctx)?;
             }
-            let result = self.eval_int(body, ctx)?;
-            let _ = result;
+            let arm_val = self.eval_int(body, ctx)?;
+            ctx.builder()
+                .build_store(result_ptr, arm_val)
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "match arm store failed".into(),
+                    )
+                })?;
             self.emit_branch(merge_block, ctx)?;
         }
         if default_block.is_none() {
@@ -273,7 +302,18 @@ impl IrBuilder {
             self.emit_branch(merge_block, ctx)?;
         }
         ctx.builder().position_at_end(merge_block);
-        Ok(i64_type.const_int(0, false))
+        let result = ctx
+            .builder()
+            .build_load(result_ptr, "match_val")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "match result load failed".into(),
+                )
+            })?
+            .into_int_value();
+        Ok(result)
     }
 
     /// Route destructuring patterns to payload extraction for enum match arms

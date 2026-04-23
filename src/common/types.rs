@@ -49,9 +49,21 @@ impl LeoType {
             "unit" | "void" => LeoType::Unit,
             "never" | "!" => LeoType::Never,
             other => {
-                // Vec<T> pattern
-                if let Some(inner) = other.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
-                    return LeoType::Vec(Box::new(LeoType::from_str(inner)));
+                // Generic pattern: Name<T1, T2, ...>
+                if let Some(lt_pos) = other.find('<') {
+                    if other.ends_with('>') {
+                        let name = &other[..lt_pos];
+                        let inner = &other[lt_pos + 1..other.len() - 1];
+                        let args: Vec<LeoType> = inner
+                            .split(',')
+                            .map(|s| LeoType::from_str(s.trim()))
+                            .collect();
+                        // Special-case Vec<T> to keep existing variant
+                        if name == "Vec" && args.len() == 1 {
+                            return LeoType::Vec(Box::new(args.into_iter().next().unwrap_or(LeoType::I64)));
+                        }
+                        return LeoType::Generic(name.to_string(), args);
+                    }
                 }
                 // Single uppercase letter → TypeVar (e.g. "T", "U")
                 let bytes = other.as_bytes();

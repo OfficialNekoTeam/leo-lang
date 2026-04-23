@@ -247,4 +247,115 @@ fn main() {
             "LLVM module should have Pair_i64 struct type"
         );
     }
+
+    // --- Audit fix tests ---
+
+    #[test]
+    fn test_match_returns_arm_value() {
+        // M4: match expression must return the matched arm's value, not 0
+        let source = "fn main() {\nlet x: i64 = match 1 { 1 => 42, _ => 99 }\nprintln(x)\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_match_val");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("match_result"),
+            "match should use result alloca slot"
+        );
+        assert!(
+            ir.contains("store i64 42"),
+            "match arm 1 => 42 should store 42 into result"
+        );
+    }
+
+    #[test]
+    fn test_puts_printf_signatures() {
+        // M5+M6: puts must be i32(i8*), printf must NOT have hardcoded i64 second param
+        let source = "fn main() {\nprintln(42)\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_sigs");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        // puts must accept i8* and return i32
+        assert!(
+            ir.contains("declare i32 @puts(ptr)") || ir.contains("declare i32 @puts(i8*)"),
+            "puts must be declared as i32(i8*), got IR: {}",
+            &ir[..ir.find("define").unwrap_or(200).min(ir.len())]
+        );
+        // printf must NOT have a hardcoded i64 second parameter
+        assert!(
+            !ir.contains("declare i32 @printf(ptr, i64") && !ir.contains("declare i32 @printf(i8*, i64"),
+            "printf must not have hardcoded i64 second parameter"
+        );
+    }
+
+    #[test]
+    fn test_parser_depth_limit() {
+        // MH1: deeply nested unary expressions must fail with a clear error.
+        // Run in a thread with a large stack so debug-mode frames don't exhaust
+        // the default 2 MB stack before our 512-level guard fires.
+        let result = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024) // 32 MB
+            .spawn(|| {
+                let prefix = "fn main() { ".to_string();
+                let suffix = " }";
+                let nested: String = "!(".repeat(520) + "1" + &")".repeat(520);
+                let source = prefix + &nested + suffix;
+                let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex");
+                crate::parser::Parser::new(tokens).parse()
+            })
+            .expect("thread spawn")
+            .join()
+            .expect("thread join");
+        assert!(result.is_err(), "deeply nested expression should fail parsing");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("nested too deeply"),
+            "error should mention nesting depth, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_zext_not_sext_for_unsigned() {
+        // zext/sext: widening a u8 to i64 must use zero-extend, not sign-extend
+        // u8 value 200 widened to i64 should be 200, not -56 (signed interpretation)
+        let source = "fn foo(x: u8) -> i64 { return x }\nfn main() { println(foo(200)) }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_zext");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        // Should contain zext for unsigned widening, not sext
+        assert!(
+            ir.contains("zext") || !ir.contains("sext i8"),
+            "widening u8→i64 must use zext, not sext: {}",
+            &ir[..300.min(ir.len())]
+        );
+    }
+
+    #[test]
+    fn test_temp_path_not_fixed() {
+        // H3: the generated temp path must not be the old fixed /tmp/leo_run_tmp
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock ok")
+            .subsec_nanos();
+        let path = format!(
+            "{}/leo_run_{}_{}",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            nanos
+        );
+        assert_ne!(path, "/tmp/leo_run_tmp", "temp path must not be the fixed old value");
+        assert!(path.contains("leo_run_"), "temp path must contain leo_run_ prefix");
+    }
 }

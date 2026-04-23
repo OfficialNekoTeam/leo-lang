@@ -13,7 +13,16 @@ pub fn run(file: Option<&str>) -> Result<(), String> {
 fn run_single_file(path: &str) -> Result<(), String> {
     let source = fs::read_to_string(path)
         .map_err(|e| format!("read {} failed: {}", path, e))?;
-    let output = "/tmp/leo_run_tmp".to_string();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("system clock error: {}", e))?
+        .subsec_nanos();
+    let output = format!(
+        "{}/leo_run_{}_{}",
+        std::env::temp_dir().display(),
+        std::process::id(),
+        nanos
+    );
     let pipeline = crate::compiler::Pipeline::new(&source, &output);
     pipeline.compile().map_err(|e| format!("{}", e))?;
     let status = process::Command::new(&output)

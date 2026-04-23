@@ -3,7 +3,9 @@ use crate::lexer::token::{Keyword, Symbol, Token, TokenWithSpan};
 
 pub struct Lexer {
     source: String,
-    pos: usize,
+    chars: Vec<char>,  // H1: pre-computed for O(1) access
+    pos: usize,        // char index
+    byte_pos: usize,   // LM3: byte offset into source for correct UTF-8 spans
     line: u32,
     column: u32,
     tokens: Vec<TokenWithSpan>,
@@ -12,8 +14,10 @@ pub struct Lexer {
 impl Lexer {
     pub fn new(source: &str) -> Self {
         Self {
+            chars: source.chars().collect(),
             source: source.to_string(),
             pos: 0,
+            byte_pos: 0,
             line: 1,
             column: 1,
             tokens: Vec::new(),
@@ -528,26 +532,29 @@ impl Lexer {
     }
 
     fn is_eof(&self) -> bool {
-        self.pos >= self.source.len()
+        self.pos >= self.chars.len()
     }
 
     fn current_char(&self) -> char {
-        self.source.chars().nth(self.pos).unwrap_or('\0')
+        self.chars.get(self.pos).copied().unwrap_or('\0')
     }
 
     fn peek_char(&self) -> char {
-        self.source.chars().nth(self.pos + 1).unwrap_or('\0')
+        self.chars.get(self.pos + 1).copied().unwrap_or('\0')
     }
 
     fn advance(&mut self) {
         if !self.is_eof() {
+            // LM3: advance byte_pos by the UTF-8 byte length of current char
+            self.byte_pos += self.chars[self.pos].len_utf8();
             self.pos += 1;
             self.column += 1;
         }
     }
 
     fn mark_pos(&self) -> Pos {
-        Pos::new(self.line, self.column, self.pos as u32)
+        // LM3: store byte offset, not char index
+        Pos::new(self.line, self.column, self.byte_pos as u32)
     }
 }
 

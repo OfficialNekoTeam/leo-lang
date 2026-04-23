@@ -3,16 +3,20 @@ use crate::ast::stmt::Stmt;
 use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult, Span};
 use crate::lexer::token::{Keyword, Symbol, Token, TokenWithSpan};
 
+/// Maximum expression nesting depth to prevent stack overflow
+const MAX_PARSE_DEPTH: usize = 512;
+
 /// Recursive descent parser with Pratt expression parsing
 pub struct Parser {
     tokens: Vec<TokenWithSpan>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
     /// Create parser from token stream
     pub fn new(tokens: Vec<TokenWithSpan>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, depth: 0 }
     }
 
     /// Parse full program into statement list
@@ -470,8 +474,17 @@ impl Parser {
         ))
     }
 
-    /// Parse if: if expr { stmts } [else { stmts }] or else if chain
+    /// Parse if: if expr { stmts } [else { stmts }] or else if chain — with depth guard
     fn parse_if(&mut self) -> LeoResult<Stmt> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::ParserUnexpectedToken,
+                "expression nested too deeply (max 512 levels)".into(),
+            ));
+        }
         let start = self.cur_span();
         self.advance();
         let cond = self.parse_expr()?;
@@ -496,6 +509,7 @@ impl Parser {
         } else {
             None
         };
+        self.depth -= 1;
         Ok(Stmt::If(branches, els, self.merge(start, self.prev_span())))
     }
 
@@ -612,9 +626,21 @@ impl Parser {
         self.parse_prec(0)
     }
 
-    /// Recursive precedence climbing
+    /// Recursive precedence climbing with depth guard
     fn parse_prec(&mut self, min: u8) -> LeoResult<Expr> {
-        let mut left = self.parse_unary()?;
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::ParserUnexpectedToken,
+                "expression nested too deeply (max 512 levels)".into(),
+            ));
+        }
+        let mut left = match self.parse_unary() {
+            Ok(e) => { self.depth -= 1; e }
+            Err(e) => { self.depth -= 1; return Err(e); }
+        };
         loop {
             // Lookahead: if left is Ident and next is `<`, try type args
             if let Expr::Ident(_, _) = &left {
@@ -674,8 +700,17 @@ impl Parser {
         }
     }
 
-    /// Parse unary: -expr, !expr
+    /// Parse unary: -expr, !expr — with depth guard
     fn parse_unary(&mut self) -> LeoResult<Expr> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::ParserUnexpectedToken,
+                "expression nested too deeply (max 512 levels)".into(),
+            ));
+        }
         let op = if self.match_sym(Symbol::Minus) {
             Some(UnOp::Neg)
         } else if self.match_sym(Symbol::Bang) {
@@ -684,10 +719,15 @@ impl Parser {
             None
         };
         if let Some(op) = op {
-            let e = self.parse_unary()?;
+            let e = match self.parse_unary() {
+                Ok(e) => { self.depth -= 1; e }
+                Err(e) => { self.depth -= 1; return Err(e); }
+            };
             return Ok(Expr::Unary(op, Box::new(e), Span::dummy()));
         }
-        self.parse_postfix()
+        let result = self.parse_postfix();
+        self.depth -= 1;
+        result
     }
 
     /// Parse postfix: call(), .field, [index], type_args<T>
