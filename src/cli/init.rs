@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::cli::security::escape_toml_string;
+
 /// Initialize a new Leo project
 pub fn init(name: Option<&str>) -> Result<(), String> {
     let base = match name {
@@ -20,9 +22,11 @@ pub fn init(name: Option<&str>) -> Result<(), String> {
     if toml_path.exists() {
         return Err("leo.toml already exists".into());
     }
-    let project_name = base_path.file_name()
+    let project_name = base_path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("leo-project");
+    let project_name = escape_toml_string(project_name)?;
     let toml_content = format!(
         "[project]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[build]\nentry = \"src/main.leo\"\noutput = \"target/main\"\n",
         project_name

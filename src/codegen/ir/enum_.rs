@@ -39,16 +39,22 @@ impl IrBuilder {
                 format!("enum {} not defined in LLVM", enum_name),
             )
         })?;
-        let size = struct_type.size_of().ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "enum size fail".into()))?;
-        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc not found".into()))?;
-        let call_res = ctx.builder().build_call(malloc_fn, &[size.into()], "enum_alloc").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "call failed".into()))?;
-        let alloc_ptr = call_res.try_as_basic_value().left().ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "malloc void".into()))?
-            .into_pointer_value();
-            
-        let alloc_i64 = ctx.builder().build_ptr_to_int(alloc_ptr, i64_type, "enum_alloc_i64").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "ptr_to_int enum malloc".into()))?;
-        self.emit_null_check(alloc_i64, "runtime error: out of memory\n", ctx)?;
+        let size = struct_type.size_of().ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                "enum size fail".into(),
+            )
+        })?;
+        let alloc_ptr = self.emit_checked_malloc(size, "enum_alloc", ctx)?;
 
-        let enum_ptr = ctx.builder().build_pointer_cast(alloc_ptr, struct_type.ptr_type(inkwell::AddressSpace::default()), "enum_ptr")
+        let enum_ptr = ctx
+            .builder()
+            .build_pointer_cast(
+                alloc_ptr,
+                struct_type.ptr_type(inkwell::AddressSpace::default()),
+                "enum_ptr",
+            )
             .map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
@@ -259,6 +265,8 @@ impl IrBuilder {
                 }
                 _ => {
                     if let Expr::Number(n, _) = pattern {
+                        cases.push((i64_type.const_int(*n as u64, false), arm_block));
+                    } else if let Expr::IntLiteral(n, _, _) = pattern {
                         cases.push((i64_type.const_int(*n as u64, false), arm_block));
                     } else {
                         cases.push((i64_type.const_int(i as u64, false), arm_block));

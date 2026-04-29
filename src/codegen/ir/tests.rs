@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use crate::ast::expr::Expr;
     use crate::codegen::ir::IrBuilder;
+    use crate::common::span::Span;
+    use crate::common::types::LeoType;
     use crate::llvm::context::LlvmContext;
     use inkwell::context::Context;
 
@@ -10,6 +13,102 @@ mod tests {
         let context = Context::create();
         let mut ctx = LlvmContext::new(&context, "test");
         assert!(builder.build(&[], &mut ctx).is_ok());
+    }
+
+    #[test]
+    fn test_unknown_identifier_infers_unknown() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test_unknown_type");
+        let ty = builder.infer_expr_type(&Expr::Ident("missing".into(), Span::dummy()), &ctx);
+        assert_eq!(ty, LeoType::Unknown);
+    }
+
+    #[test]
+    fn test_unknown_call_infers_unknown() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test_unknown_call");
+        let ty = builder.infer_expr_type(
+            &Expr::Call(
+                Box::new(Expr::Ident("missing".into(), Span::dummy())),
+                vec![],
+                vec![],
+                Span::dummy(),
+            ),
+            &ctx,
+        );
+        assert_eq!(ty, LeoType::Unknown);
+    }
+
+    #[test]
+    fn test_enum_name_infers_enum_type() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_enum_type");
+        ctx.register_enum("Token".into(), vec!["Eof".into()]);
+        let ty = builder.infer_expr_type(&Expr::Ident("Token".into(), Span::dummy()), &ctx);
+        assert_eq!(ty, LeoType::Enum("Token".into()));
+    }
+
+    #[test]
+    fn test_typed_literals_infer_precise_types() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test_typed_literals");
+        assert_eq!(
+            builder.infer_expr_type(&Expr::IntLiteral(42, LeoType::U16, Span::dummy()), &ctx),
+            LeoType::U16
+        );
+        assert_eq!(
+            builder.infer_expr_type(&Expr::IntLiteral(42, LeoType::USize, Span::dummy()), &ctx),
+            LeoType::USize
+        );
+        assert_eq!(
+            builder.infer_expr_type(&Expr::FloatLiteral(1.0, LeoType::F32, Span::dummy()), &ctx),
+            LeoType::F32
+        );
+    }
+
+    #[test]
+    fn test_typed_literal_ir() {
+        let source = "fn main() {\nlet a = 255u8\nlet b = 3.5f\nlet c = 1u128\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_typed_literal_ir");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("alloca i8"),
+            "u8 literal should infer i8 storage"
+        );
+        assert!(
+            ir.contains("alloca float"),
+            "f32 literal should infer float storage"
+        );
+        assert!(
+            ir.contains("alloca i128"),
+            "u128 literal should infer i128 storage"
+        );
+    }
+
+    #[test]
+    fn test_tuple_literal_ir() {
+        let source = "fn main() {\nlet t: (i64, bool) = (1, true)\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_tuple_literal_ir");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(ir.contains("tuple_malloc"), "tuple should allocate storage");
+        assert!(
+            ir.contains("alloca i64"),
+            "tuple value should be pointer-sized"
+        );
     }
 
     #[test]
@@ -133,8 +232,12 @@ mod tests {
             ir.contains("fopen")
                 && ir.contains("fread")
                 && ir.contains("fseek")
-                && ir.contains("ftell"),
-            "file_read should use fopen+fseek+ftell+fread"
+                && ir.contains("ftell")
+                && ir.contains("file_read size invalid")
+                && ir.contains("file_read too large")
+                && ir.contains("file_fail_cond")
+                && ir.contains("fclose_fail"),
+            "file_read should validate size before fread"
         );
     }
 
@@ -290,7 +393,8 @@ fn main() {
         );
         // printf must NOT have a hardcoded i64 second parameter
         assert!(
-            !ir.contains("declare i32 @printf(ptr, i64") && !ir.contains("declare i32 @printf(i8*, i64"),
+            !ir.contains("declare i32 @printf(ptr, i64")
+                && !ir.contains("declare i32 @printf(i8*, i64"),
             "printf must not have hardcoded i64 second parameter"
         );
     }
@@ -313,7 +417,10 @@ fn main() {
             .expect("thread spawn")
             .join()
             .expect("thread join");
-        assert!(result.is_err(), "deeply nested expression should fail parsing");
+        assert!(
+            result.is_err(),
+            "deeply nested expression should fail parsing"
+        );
         let msg = format!("{}", result.unwrap_err());
         assert!(
             msg.contains("nested too deeply"),
@@ -355,7 +462,13 @@ fn main() {
             std::process::id(),
             nanos
         );
-        assert_ne!(path, "/tmp/leo_run_tmp", "temp path must not be the fixed old value");
-        assert!(path.contains("leo_run_"), "temp path must contain leo_run_ prefix");
+        assert_ne!(
+            path, "/tmp/leo_run_tmp",
+            "temp path must not be the fixed old value"
+        );
+        assert!(
+            path.contains("leo_run_"),
+            "temp path must contain leo_run_ prefix"
+        );
     }
 }

@@ -15,6 +15,59 @@ impl<'ctx> TypedValue<'ctx> {
 }
 
 impl IrBuilder {
+    pub(super) fn eval_tuple_alloc<'a>(
+        &mut self,
+        elems: &[Expr],
+        ctx: &mut LlvmContext<'a>,
+    ) -> LeoResult<inkwell::values::IntValue<'a>> {
+        let context = ctx.module().get_context();
+        let i64_type = context.i64_type();
+        let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
+        let total_size = i64_type.const_int(elems.len() as u64 * 8, false);
+        let mem_pval = self.emit_checked_malloc(total_size, "tuple_malloc", ctx)?;
+        let base = ctx
+            .builder()
+            .build_pointer_cast(mem_pval, i64_ptr_type, "tuple_base")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "tuple ptr cast failed".into(),
+                )
+            })?;
+        for (i, elem) in elems.iter().enumerate() {
+            let val = self.eval_int(elem, ctx)?;
+            let idx = i64_type.const_int(i as u64, false);
+            let elem_ptr = unsafe {
+                ctx.builder()
+                    .build_in_bounds_gep(base, &[idx], "tuple_field")
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "tuple gep failed".into(),
+                        )
+                    })?
+            };
+            ctx.builder().build_store(elem_ptr, val).map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "tuple field store failed".into(),
+                )
+            })?;
+        }
+        ctx.builder()
+            .build_ptr_to_int(base, i64_type, "tuple_as_int")
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "tuple ptr_to_int failed".into(),
+                )
+            })
+    }
+
     pub(super) fn eval_index<'a>(
         &mut self,
         obj: &Expr,
@@ -231,43 +284,7 @@ impl IrBuilder {
             Expr::Array(elements, _) => {
                 let count = elements.len() as u64;
                 let alloc_size = i64_type.const_int(count * 8, false);
-                let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        "malloc not declared".into(),
-                    )
-                })?;
-                let mem = ctx
-                    .builder()
-                    .build_call(malloc_fn, &[alloc_size.into()], "array_malloc")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "malloc failed".into(),
-                        )
-                    })?;
-                let mem_ptr = mem.try_as_basic_value().left().ok_or_else(|| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        "malloc void".into(),
-                    )
-                })?;
-                let mem_pval = mem_ptr.into_pointer_value();
-                // NULL check: abort if array malloc failed
-                let mem_i64 = ctx
-                    .builder()
-                    .build_ptr_to_int(mem_pval, i64_type, "arr_i64")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "ptr_to_int failed".into(),
-                        )
-                    })?;
-                self.emit_null_check(mem_i64, "runtime error: out of memory\n", ctx)?;
+                let mem_pval = self.emit_checked_malloc(alloc_size, "array_malloc", ctx)?;
                 let base = ctx
                     .builder()
                     .build_pointer_cast(mem_pval, i64_ptr_type, "array_base")
@@ -314,10 +331,6 @@ impl IrBuilder {
             }
             Expr::ArrayRepeat(val, count_expr, _) => {
                 let count_val = self.eval_int(count_expr, ctx)?;
-                let _count_const = match count_expr.as_ref() {
-                    Expr::Number(n, _) => *n as u64,
-                    _ => 1,
-                };
                 let context = ctx.module().get_context();
                 let i64_type = context.i64_type();
                 let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
@@ -369,43 +382,7 @@ impl IrBuilder {
                             "mul failed".into(),
                         )
                     })?;
-                let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        "malloc not declared".into(),
-                    )
-                })?;
-                let mem = ctx
-                    .builder()
-                    .build_call(malloc_fn, &[alloc_size.into()], "array_malloc")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "malloc failed".into(),
-                        )
-                    })?;
-                let mem_ptr = mem.try_as_basic_value().left().ok_or_else(|| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        "malloc void".into(),
-                    )
-                })?;
-                let mem_pval = mem_ptr.into_pointer_value();
-                // NULL check: abort if array repeat malloc failed
-                let mem_i64 = ctx
-                    .builder()
-                    .build_ptr_to_int(mem_pval, i64_type, "arr_i64")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "ptr_to_int failed".into(),
-                        )
-                    })?;
-                self.emit_null_check(mem_i64, "runtime error: out of memory\n", ctx)?;
+                let mem_pval = self.emit_checked_malloc(alloc_size, "array_malloc", ctx)?;
                 let base = ctx
                     .builder()
                     .build_pointer_cast(mem_pval, i64_ptr_type, "array_base")
@@ -563,51 +540,14 @@ impl IrBuilder {
         match expr {
             Expr::StructInit(name, fields, type_args, _) => {
                 // If this is a generic struct with type args, instantiate it
-                let _effective_name = if !type_args.is_empty()
-                    && self.generic_structs.contains_key(name)
-                {
-                    self.instantiate_generic_struct(name, type_args, ctx)?
-                } else {
-                    name.clone()
-                };
+                let _effective_name =
+                    if !type_args.is_empty() && self.generic_structs.contains_key(name) {
+                        self.instantiate_generic_struct(name, type_args, ctx)?
+                    } else {
+                        name.clone()
+                    };
                 let total_size = i64_type.const_int(fields.len() as u64 * 8, false);
-                let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        "malloc not declared".into(),
-                    )
-                })?;
-                let mem = ctx
-                    .builder()
-                    .build_call(malloc_fn, &[total_size.into()], "struct_malloc")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "malloc failed".into(),
-                        )
-                    })?;
-                let mem_ptr = mem.try_as_basic_value().left().ok_or_else(|| {
-                    LeoError::new(
-                        ErrorKind::Syntax,
-                        ErrorCode::CodegenLLVMError,
-                        "malloc void".into(),
-                    )
-                })?;
-                let mem_pval = mem_ptr.into_pointer_value();
-                // NULL check: abort if struct malloc failed
-                let mem_i64 = ctx
-                    .builder()
-                    .build_ptr_to_int(mem_pval, i64_type, "struct_i64")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "ptr_to_int failed".into(),
-                        )
-                    })?;
-                self.emit_null_check(mem_i64, "runtime error: out of memory\n", ctx)?;
+                let mem_pval = self.emit_checked_malloc(total_size, "struct_malloc", ctx)?;
                 let base = ctx
                     .builder()
                     .build_pointer_cast(mem_pval, i64_ptr_type, "struct_base")
@@ -655,5 +595,4 @@ impl IrBuilder {
             _ => Ok(i64_type.const_int(0, false)),
         }
     }
-
 }

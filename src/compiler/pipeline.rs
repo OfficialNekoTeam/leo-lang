@@ -1,9 +1,9 @@
+use crate::codegen::Generator;
 use crate::common::LeoResult;
 use crate::lexer::Lexer;
+use crate::lint::{SafetyLinter, SemanticLinter, StyleLinter, SyntaxLinter, WarningLinter};
 use crate::parser::Parser;
 use crate::sema::Checker;
-use crate::lint::{SyntaxLinter, SemanticLinter, WarningLinter, StyleLinter, SafetyLinter};
-use crate::codegen::Generator;
 
 /// Compilation pipeline orchestrating all stages
 pub struct Pipeline {
@@ -14,7 +14,10 @@ pub struct Pipeline {
 impl Pipeline {
     /// Create pipeline with source code and output path
     pub fn new(source: &str, output: &str) -> Self {
-        Self { source: source.to_string(), output: output.to_string() }
+        Self {
+            source: source.to_string(),
+            output: output.to_string(),
+        }
     }
 
     /// Run full compilation pipeline
@@ -34,7 +37,10 @@ impl Pipeline {
     }
 
     /// Stage 2: Parsing
-    fn stage_parser(&self, tokens: &[crate::lexer::token::TokenWithSpan]) -> LeoResult<Vec<crate::ast::stmt::Stmt>> {
+    fn stage_parser(
+        &self,
+        tokens: &[crate::lexer::token::TokenWithSpan],
+    ) -> LeoResult<Vec<crate::ast::stmt::Stmt>> {
         let mut parser = Parser::new(tokens.to_vec());
         parser.parse()
     }
@@ -46,15 +52,22 @@ impl Pipeline {
     }
 
     /// Stage 4: Lint checks (non-fatal)
-    fn stage_lint(&self, tokens: &[crate::lexer::token::TokenWithSpan], stmts: &[crate::ast::stmt::Stmt]) {
-        let all: Vec<_> = SyntaxLinter::lint(tokens).unwrap_or_default()
+    fn stage_lint(
+        &self,
+        tokens: &[crate::lexer::token::TokenWithSpan],
+        stmts: &[crate::ast::stmt::Stmt],
+    ) {
+        let all: Vec<_> = SyntaxLinter::lint(tokens)
+            .unwrap_or_default()
             .into_iter()
             .chain(SemanticLinter::lint(stmts))
             .chain(WarningLinter::lint(stmts))
-            .chain(StyleLinter::lint(stmts))
+            .chain(StyleLinter::lint_with_source(stmts, Some(&self.source)))
             .chain(SafetyLinter::lint(stmts))
             .collect();
-        for err in &all { eprintln!("lint: {}", err); }
+        for err in &all {
+            eprintln!("lint: {}", err);
+        }
     }
 
     /// Stage 5: Code generation

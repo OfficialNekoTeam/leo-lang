@@ -1,9 +1,13 @@
-use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::ast::stmt::Stmt;
+use crate::cli::security::{linker_program, run_checked};
 use crate::codegen::ir::IrBuilder;
-use inkwell::context::Context;
-use inkwell::targets::{InitializationConfig, Target, TargetMachine, CodeModel, RelocMode, FileType};
+use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult};
 use crate::llvm::context::LlvmContext;
+use inkwell::context::Context;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+};
+use std::process::Command;
 
 /// Top-level code generator
 pub struct Generator {
@@ -13,7 +17,9 @@ pub struct Generator {
 impl Generator {
     /// Create generator with output file path
     pub fn new(output_path: &str) -> Self {
-        Self { output_path: output_path.to_string() }
+        Self {
+            output_path: output_path.to_string(),
+        }
     }
 
     /// Generate native code from AST statements
@@ -34,29 +40,47 @@ impl Generator {
     fn emit_object(&self, ctx: &LlvmContext) -> LeoResult<()> {
         Target::initialize_x86(&InitializationConfig::default());
         let triple = TargetMachine::get_default_triple();
-        let target = Target::from_triple(&triple)
-            .map_err(|e| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
-                format!("target error: {:?}", e)))?;
-        let machine = target.create_target_machine(
-            &triple,
-            "generic",
-            "",
-            inkwell::OptimizationLevel::Aggressive,
-            RelocMode::Default,
-            CodeModel::Default,
-        ).ok_or_else(|| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
-            "failed to create target machine".into()))?;
+        let target = Target::from_triple(&triple).map_err(|e| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!("target error: {:?}", e),
+            )
+        })?;
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                inkwell::OptimizationLevel::Aggressive,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "failed to create target machine".into(),
+                )
+            })?;
 
         let obj_path = self.output_path.clone() + ".o";
-        machine.write_to_file(ctx.module(), FileType::Object, obj_path.as_ref())
-            .map_err(|e| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
-                format!("write object failed: {:?}", e)))?;
+        machine
+            .write_to_file(ctx.module(), FileType::Object, obj_path.as_ref())
+            .map_err(|e| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    format!("write object failed: {:?}", e),
+                )
+            })?;
 
-        std::process::Command::new("clang")
-            .args([&obj_path, "-o", &self.output_path])
-            .status()
-            .map_err(|e| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError,
-                format!("link failed: {}", e)))?;
+        let linker = linker_program()
+            .map_err(|e| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, e))?;
+        let mut command = Command::new(&linker);
+        command.args([&obj_path, "-o", &self.output_path]);
+        run_checked(&mut command, "link")
+            .map_err(|e| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, e))?;
 
         std::fs::remove_file(&obj_path).ok();
         Ok(())

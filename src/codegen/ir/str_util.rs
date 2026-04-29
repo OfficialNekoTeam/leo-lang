@@ -1,8 +1,8 @@
 use super::*;
 use crate::ast::expr::Expr;
 use crate::common::error::{ErrorCode, ErrorKind, LeoError, LeoResult};
-use inkwell::IntPredicate;
 use inkwell::AddressSpace;
+use inkwell::IntPredicate;
 
 impl IrBuilder {
     /// Builtin char_to_str(ch): convert i64 ASCII code to single-char heap string
@@ -19,47 +19,8 @@ impl IrBuilder {
             return Ok(i64_type.const_int(0, false));
         }
         let ch_val = self.eval_int(&args[0], ctx)?;
-        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc not declared".into(),
-            )
-        })?;
         let buf_size = i64_type.const_int(2, false);
-        let buf_alloc = ctx
-            .builder()
-            .build_call(malloc_fn, &[buf_size.into()], "c2s_malloc")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc char_to_str failed".into(),
-                )
-            })?;
-        let buf_raw = buf_alloc
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc returned void".into(),
-                )
-            })?
-            .into_pointer_value();
-        // NULL check: abort if char_to_str malloc failed
-        let buf_i64 = ctx
-            .builder()
-            .build_ptr_to_int(buf_raw, i64_type, "c2s_i64")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr_to_int failed".into(),
-                )
-            })?;
-        self.emit_null_check(buf_i64, "runtime error: out of memory\n", ctx)?;
+        let buf_raw = self.emit_checked_malloc(buf_size, "c2s_malloc", ctx)?;
         let buf_ptr = ctx
             .builder()
             .build_pointer_cast(buf_raw, i8_ptr, "c2s_buf")
@@ -334,47 +295,8 @@ impl IrBuilder {
             return Ok(i64_type.const_int(0, false));
         }
         let n_val = self.eval_int(&args[0], ctx)?;
-        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc not declared".into(),
-            )
-        })?;
         let buf_size = i64_type.const_int(32, false);
-        let buf_alloc = ctx
-            .builder()
-            .build_call(malloc_fn, &[buf_size.into()], "ts_malloc")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc to_string failed".into(),
-                )
-            })?;
-        let buf_raw = buf_alloc
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc returned void".into(),
-                )
-            })?
-            .into_pointer_value();
-        // NULL check: abort if to_string malloc failed
-        let buf_i64 = ctx
-            .builder()
-            .build_ptr_to_int(buf_raw, i64_type, "ts_i64")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr_to_int failed".into(),
-                )
-            })?;
-        self.emit_null_check(buf_i64, "runtime error: out of memory\n", ctx)?;
+        let buf_raw = self.emit_checked_malloc(buf_size, "ts_malloc", ctx)?;
         let buf_ptr = ctx
             .builder()
             .build_pointer_cast(buf_raw, i8_ptr, "ts_buf")

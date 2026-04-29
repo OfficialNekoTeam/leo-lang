@@ -1,14 +1,18 @@
 use crate::common::span::Span;
+use crate::common::types::LeoType;
 
 #[derive(Debug, Clone)]
 pub enum Expr {
     Ident(String, Span),
     Number(i64, Span),
+    IntLiteral(u128, LeoType, Span),
     Float(f64, Span),
+    FloatLiteral(f64, LeoType, Span),
     String(String, Span),
     Char(char, Span),
     Bool(bool, Span),
     Unit(Span),
+    Tuple(Vec<Expr>, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
     Unary(UnOp, Box<Expr>, Span),
     /// Call(callee, args, type_args, span)
@@ -97,6 +101,13 @@ mod tests {
     }
 
     #[test]
+    fn test_expr_tuple() {
+        let span = Span::dummy();
+        let expr = Expr::Tuple(vec![Expr::Number(1, span), Expr::Bool(true, span)], span);
+        assert!(matches!(expr, Expr::Tuple(elems, _) if elems.len() == 2));
+    }
+
+    #[test]
     fn test_expr_binary() {
         let span = Span::dummy();
         let left = Box::new(Expr::Number(1, span));
@@ -126,10 +137,7 @@ mod tests {
     #[test]
     fn test_expr_block() {
         let span = Span::dummy();
-        let exprs = vec![
-            Expr::Number(1, span),
-            Expr::Number(2, span),
-        ];
+        let exprs = vec![Expr::Number(1, span), Expr::Number(2, span)];
         let expr = Expr::Block(exprs, span);
         assert!(matches!(expr, Expr::Block(_, _)));
     }

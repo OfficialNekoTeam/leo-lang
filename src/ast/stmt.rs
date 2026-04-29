@@ -170,12 +170,7 @@ mod tests {
     fn test_stmt_generic_struct() {
         let fields = vec![("data".to_string(), "T".to_string())];
         let type_params = vec!["T".to_string()];
-        let stmt = Stmt::Struct(
-            "Stack".to_string(),
-            fields,
-            type_params,
-            Span::dummy(),
-        );
+        let stmt = Stmt::Struct("Stack".to_string(), fields, type_params, Span::dummy());
         if let Stmt::Struct(name, _, tparams, _) = &stmt {
             assert_eq!(name, "Stack");
             assert_eq!(tparams, &["T".to_string()]);

@@ -260,44 +260,7 @@ impl IrBuilder {
                 )
             })?;
 
-        // dest = malloc(alloc_size)
-        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc not declared".into(),
-            )
-        })?;
-        let dest = ctx
-            .builder()
-            .build_call(malloc_fn, &[alloc_size.into()], "malloc_dest")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc failed".into(),
-                )
-            })?;
-        let dest_ptr = dest.try_as_basic_value().left().ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc void".into(),
-            )
-        })?;
-        let dest_pval = dest_ptr.into_pointer_value();
-        // NULL check: abort if slice malloc failed
-        let dest_i64 = ctx
-            .builder()
-            .build_ptr_to_int(dest_pval, i64_type, "dest_i64")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr_to_int failed".into(),
-                )
-            })?;
-        self.emit_null_check(dest_i64, "runtime error: out of memory\n", ctx)?;
+        let dest_pval = self.emit_checked_malloc(alloc_size, "malloc_dest", ctx)?;
         let dest_i8 = ctx
             .builder()
             .build_pointer_cast(dest_pval, i8_ptr_type, "dest_i8")
@@ -515,44 +478,7 @@ impl IrBuilder {
                 )
             })?;
 
-        // dest = malloc(total)
-        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc not declared".into(),
-            )
-        })?;
-        let dest = ctx
-            .builder()
-            .build_call(malloc_fn, &[total.into()], "malloc_concat")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc failed".into(),
-                )
-            })?;
-        let dest_ptr = dest.try_as_basic_value().left().ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc void".into(),
-            )
-        })?;
-        let dest_pval = dest_ptr.into_pointer_value();
-        // NULL check: abort if concat malloc failed
-        let dest_i64 = ctx
-            .builder()
-            .build_ptr_to_int(dest_pval, i64_type, "dest_i64")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr_to_int failed".into(),
-                )
-            })?;
-        self.emit_null_check(dest_i64, "runtime error: out of memory\n", ctx)?;
+        let dest_pval = self.emit_checked_malloc(total, "malloc_concat", ctx)?;
         let dest_i8 = ctx
             .builder()
             .build_pointer_cast(dest_pval, i8_ptr_type, "dest_i8")
@@ -581,10 +507,22 @@ impl IrBuilder {
         })?;
         ctx.builder()
             .build_call(strcpy_fn, &[dest_i8.into(), a_ptr.into()], "strcpy_call")
-            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "strcpy call fail".into()))?;
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strcpy call fail".into(),
+                )
+            })?;
         ctx.builder()
             .build_call(strcat_fn, &[dest_i8.into(), b_ptr.into()], "strcat_call")
-            .map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "strcat call fail".into()))?;
+            .map_err(|_| {
+                LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::CodegenLLVMError,
+                    "strcat call fail".into(),
+                )
+            })?;
 
         let dest_as_i64 = ctx
             .builder()
@@ -688,5 +626,4 @@ impl IrBuilder {
             })?;
         Ok(extended)
     }
-
 }

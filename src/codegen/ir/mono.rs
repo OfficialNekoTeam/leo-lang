@@ -23,10 +23,7 @@ impl IrBuilder {
     /// Build a mangled name for a monomorphized instance.
     /// e.g. "max" + ["i64"] => "max_i64"
     /// e.g. "Stack" + ["i64"] => "Stack_i64"
-    pub(super) fn mangle_generic_name(
-        base: &str,
-        type_args: &[String],
-    ) -> String {
+    pub(super) fn mangle_generic_name(base: &str, type_args: &[String]) -> String {
         if type_args.is_empty() {
             return base.to_string();
         }
@@ -35,10 +32,7 @@ impl IrBuilder {
 
     /// Substitute type parameters in a parameter type string.
     /// e.g. "T" with mapping {"T": "i64"} => "i64"
-    fn substitute_type(
-        ty: &str,
-        type_map: &std::collections::HashMap<String, String>,
-    ) -> String {
+    fn substitute_type(ty: &str, type_map: &std::collections::HashMap<String, String>) -> String {
         type_map.get(ty).cloned().unwrap_or_else(|| ty.to_string())
     }
 
@@ -50,13 +44,9 @@ impl IrBuilder {
     ) -> (Vec<(String, String)>, Option<String>) {
         let new_params: Vec<(String, String)> = params
             .iter()
-            .map(|(name, ty)| {
-                (name.clone(), Self::substitute_type(ty, type_map))
-            })
+            .map(|(name, ty)| (name.clone(), Self::substitute_type(ty, type_map)))
             .collect();
-        let new_ret = ret
-            .as_ref()
-            .map(|r| Self::substitute_type(r, type_map));
+        let new_ret = ret.as_ref().map(|r| Self::substitute_type(r, type_map));
         (new_params, new_ret)
     }
 
@@ -67,19 +57,14 @@ impl IrBuilder {
     ) -> Vec<(String, String)> {
         fields
             .iter()
-            .map(|(name, ty)| {
-                (name.clone(), Self::substitute_type(ty, type_map))
-            })
+            .map(|(name, ty)| (name.clone(), Self::substitute_type(ty, type_map)))
             .collect()
     }
 
     /// Substitute type parameters in expressions (recursive).
     /// Replaces type args in Call and StructInit, and rewrites
     /// identifiers that match type param names.
-    fn substitute_expr(
-        expr: &Expr,
-        type_map: &std::collections::HashMap<String, String>,
-    ) -> Expr {
+    fn substitute_expr(expr: &Expr, type_map: &std::collections::HashMap<String, String>) -> Expr {
         match expr {
             Expr::Call(callee, args, type_args, span) => {
                 let new_callee = Box::new(Self::substitute_expr(callee, type_map));
@@ -105,44 +90,34 @@ impl IrBuilder {
                     .collect();
                 Expr::StructInit(new_name, new_fields, new_type_args, *span)
             }
-            Expr::Binary(op, l, r, span) => {
-                Expr::Binary(
-                    op.clone(),
-                    Box::new(Self::substitute_expr(l, type_map)),
-                    Box::new(Self::substitute_expr(r, type_map)),
-                    *span,
-                )
-            }
-            Expr::Unary(op, e, span) => {
-                Expr::Unary(
-                    op.clone(),
-                    Box::new(Self::substitute_expr(e, type_map)),
-                    *span,
-                )
-            }
-            Expr::If(cond, then, els, span) => {
-                Expr::If(
-                    Box::new(Self::substitute_expr(cond, type_map)),
-                    Box::new(Self::substitute_expr(then, type_map)),
-                    els.as_ref()
-                        .map(|e| Box::new(Self::substitute_expr(e, type_map))),
-                    *span,
-                )
-            }
-            Expr::Index(obj, idx, span) => {
-                Expr::Index(
-                    Box::new(Self::substitute_expr(obj, type_map)),
-                    Box::new(Self::substitute_expr(idx, type_map)),
-                    *span,
-                )
-            }
-            Expr::Select(obj, field, span) => {
-                Expr::Select(
-                    Box::new(Self::substitute_expr(obj, type_map)),
-                    field.clone(),
-                    *span,
-                )
-            }
+            Expr::Binary(op, l, r, span) => Expr::Binary(
+                op.clone(),
+                Box::new(Self::substitute_expr(l, type_map)),
+                Box::new(Self::substitute_expr(r, type_map)),
+                *span,
+            ),
+            Expr::Unary(op, e, span) => Expr::Unary(
+                op.clone(),
+                Box::new(Self::substitute_expr(e, type_map)),
+                *span,
+            ),
+            Expr::If(cond, then, els, span) => Expr::If(
+                Box::new(Self::substitute_expr(cond, type_map)),
+                Box::new(Self::substitute_expr(then, type_map)),
+                els.as_ref()
+                    .map(|e| Box::new(Self::substitute_expr(e, type_map))),
+                *span,
+            ),
+            Expr::Index(obj, idx, span) => Expr::Index(
+                Box::new(Self::substitute_expr(obj, type_map)),
+                Box::new(Self::substitute_expr(idx, type_map)),
+                *span,
+            ),
+            Expr::Select(obj, field, span) => Expr::Select(
+                Box::new(Self::substitute_expr(obj, type_map)),
+                field.clone(),
+                *span,
+            ),
             Expr::Array(elems, span) => {
                 let new_elems: Vec<Expr> = elems
                     .iter()
@@ -150,13 +125,11 @@ impl IrBuilder {
                     .collect();
                 Expr::Array(new_elems, *span)
             }
-            Expr::ArrayRepeat(val, count, span) => {
-                Expr::ArrayRepeat(
-                    Box::new(Self::substitute_expr(val, type_map)),
-                    Box::new(Self::substitute_expr(count, type_map)),
-                    *span,
-                )
-            }
+            Expr::ArrayRepeat(val, count, span) => Expr::ArrayRepeat(
+                Box::new(Self::substitute_expr(val, type_map)),
+                Box::new(Self::substitute_expr(count, type_map)),
+                *span,
+            ),
             Expr::Match(scrut, arms, span) => {
                 let new_scrut = Box::new(Self::substitute_expr(scrut, type_map));
                 let new_arms: Vec<(Expr, Expr)> = arms
@@ -197,10 +170,7 @@ impl IrBuilder {
     }
 
     /// Substitute type parameters in statements (recursive).
-    fn substitute_stmt(
-        stmt: &Stmt,
-        type_map: &std::collections::HashMap<String, String>,
-    ) -> Stmt {
+    fn substitute_stmt(stmt: &Stmt, type_map: &std::collections::HashMap<String, String>) -> Stmt {
         match stmt {
             Stmt::Expr(e) => Stmt::Expr(Self::substitute_expr(e, type_map)),
             Stmt::Let(name, ty, init) => {
@@ -208,25 +178,19 @@ impl IrBuilder {
                 let new_init = init.as_ref().map(|e| Self::substitute_expr(e, type_map));
                 Stmt::Let(name.clone(), new_ty, new_init)
             }
-            Stmt::Assign(name, e) => {
-                Stmt::Assign(name.clone(), Self::substitute_expr(e, type_map))
-            }
+            Stmt::Assign(name, e) => Stmt::Assign(name.clone(), Self::substitute_expr(e, type_map)),
             Stmt::MutAssign(name, e) => {
                 Stmt::MutAssign(name.clone(), Self::substitute_expr(e, type_map))
             }
-            Stmt::FieldAssign(obj, field, e) => {
-                Stmt::FieldAssign(
-                    Box::new(Self::substitute_expr(obj, type_map)),
-                    field.clone(),
-                    Self::substitute_expr(e, type_map),
-                )
-            }
-            Stmt::Return(e, span) => {
-                Stmt::Return(
-                    e.as_ref().map(|e| Self::substitute_expr(e, type_map)),
-                    *span,
-                )
-            }
+            Stmt::FieldAssign(obj, field, e) => Stmt::FieldAssign(
+                Box::new(Self::substitute_expr(obj, type_map)),
+                field.clone(),
+                Self::substitute_expr(e, type_map),
+            ),
+            Stmt::Return(e, span) => Stmt::Return(
+                e.as_ref().map(|e| Self::substitute_expr(e, type_map)),
+                *span,
+            ),
             Stmt::If(branches, els, span) => {
                 let new_branches: Vec<(Expr, Vec<Stmt>)> = branches
                     .iter()
@@ -247,28 +211,23 @@ impl IrBuilder {
                 });
                 Stmt::If(new_branches, new_els, *span)
             }
-            Stmt::While(cond, body, span) => {
-                Stmt::While(
-                    Self::substitute_expr(cond, type_map),
-                    body.iter()
-                        .map(|s| Self::substitute_stmt(s, type_map))
-                        .collect(),
-                    *span,
-                )
-            }
-            Stmt::For(name, iter, body, span) => {
-                Stmt::For(
-                    name.clone(),
-                    Self::substitute_expr(iter, type_map),
-                    body.iter()
-                        .map(|s| Self::substitute_stmt(s, type_map))
-                        .collect(),
-                    *span,
-                )
-            }
+            Stmt::While(cond, body, span) => Stmt::While(
+                Self::substitute_expr(cond, type_map),
+                body.iter()
+                    .map(|s| Self::substitute_stmt(s, type_map))
+                    .collect(),
+                *span,
+            ),
+            Stmt::For(name, iter, body, span) => Stmt::For(
+                name.clone(),
+                Self::substitute_expr(iter, type_map),
+                body.iter()
+                    .map(|s| Self::substitute_stmt(s, type_map))
+                    .collect(),
+                *span,
+            ),
             Stmt::Function(name, params, ret, body, tparams, span) => {
-                let (new_params, new_ret) =
-                    Self::substitute_fn_signature(params, ret, type_map);
+                let (new_params, new_ret) = Self::substitute_fn_signature(params, ret, type_map);
                 let new_body: Vec<Stmt> = body
                     .iter()
                     .map(|s| Self::substitute_stmt(s, type_map))
@@ -299,6 +258,7 @@ impl IrBuilder {
 
     /// Instantiate a generic function: clone its AST, substitute types,
     /// and compile as a regular function with a mangled name.
+    /// Tracks instantiation depth to prevent infinite recursive instantiation.
     pub(super) fn instantiate_generic_fn(
         &mut self,
         base_name: &str,
@@ -312,17 +272,37 @@ impl IrBuilder {
             return Ok(mangled);
         }
 
-        let def = self
-            .generic_fns
-            .get(base_name)
-            .cloned()
-            .ok_or_else(|| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    format!("generic function '{}' not defined", base_name),
-                )
-            })?;
+        // Cycle/depth guard: reject if this mangling is already being instantiated,
+        // or if the total instantiation stack is too deep.
+        const MAX_INSTANTIATION_DEPTH: usize = 64;
+        if self.instantiation_stack.contains(&mangled) {
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!(
+                    "generic function '{}' recursively instantiates itself",
+                    mangled
+                ),
+            ));
+        }
+        if self.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!(
+                    "generic instantiation depth limit ({}) exceeded for '{}'",
+                    MAX_INSTANTIATION_DEPTH, mangled
+                ),
+            ));
+        }
+
+        let def = self.generic_fns.get(base_name).cloned().ok_or_else(|| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::CodegenLLVMError,
+                format!("generic function '{}' not defined", base_name),
+            )
+        })?;
 
         if type_args.len() != def.type_params.len() {
             return Err(LeoError::new(
@@ -342,18 +322,26 @@ impl IrBuilder {
             type_map.insert(param.clone(), arg.clone());
         }
 
-        let (new_params, new_ret) =
-            Self::substitute_fn_signature(&def.params, &def.ret, &type_map);
+        let (new_params, new_ret) = Self::substitute_fn_signature(&def.params, &def.ret, &type_map);
         let new_body = Self::substitute_body(&def.body, &type_map);
+
+        // Push onto instantiation stack
+        self.instantiation_stack.insert(mangled.clone());
+        self.instantiation_depth += 1;
 
         // Save the current builder position (we're mid-codegen in another fn)
         let saved_block = ctx.builder().get_insert_block();
         let saved_fn = ctx.current_fn();
         let saved_vars = ctx.save_variables();
 
-        self.build_fn(&mangled, &new_params, &new_ret, &new_body, ctx)?;
+        let result = self.build_fn(&mangled, &new_params, &new_ret, &new_body, ctx);
 
-        // Restore previous builder position
+        // Pop from instantiation stack
+        self.instantiation_stack.remove(&mangled);
+        self.instantiation_depth -= 1;
+
+        // Restore LLVM builder state unconditionally — must happen before propagating
+        // any error so that subsequent codegen is not left with a dangling insert block.
         if let Some(block) = saved_block {
             ctx.builder().position_at_end(block);
         }
@@ -361,6 +349,8 @@ impl IrBuilder {
             ctx.set_current_fn(fv);
         }
         ctx.restore_variables(saved_vars);
+
+        result?;
 
         Ok(mangled)
     }
@@ -423,8 +413,7 @@ impl IrBuilder {
 
         // Register field metadata
         let field_names: Vec<String> = new_fields.iter().map(|(n, _)| n.clone()).collect();
-        let field_type_names: Vec<String> =
-            new_fields.iter().map(|(_, ty)| ty.clone()).collect();
+        let field_type_names: Vec<String> = new_fields.iter().map(|(_, ty)| ty.clone()).collect();
         self.struct_fields.insert(mangled.clone(), field_names);
         self.struct_field_types
             .insert(mangled.clone(), field_type_names);
