@@ -7,7 +7,14 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+pub(super) const MAX_FILE_READ_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const ERR_CANNOT_OPEN_FILE: &str = "runtime error: cannot open file\n";
+pub(super) const ERR_FILE_READ_SIZE: &str = "runtime error: file_read size invalid\n";
+pub(super) const ERR_FILE_READ_TOO_LARGE: &str = "runtime error: file_read too large\n";
+pub(super) const ERR_OUT_OF_MEMORY: &str = "runtime error: out of memory\n";
+pub(super) const ERR_PATH_TRAVERSAL: &str = "runtime error: path traversal blocked\n";
 
 mod builtins;
 mod control;
@@ -35,6 +42,10 @@ pub struct IrBuilder {
     pub(super) enum_payload_types: HashMap<String, Vec<String>>,
     pub(super) generic_fns: HashMap<String, mono::GenericFnDef>,
     pub(super) generic_structs: HashMap<String, mono::GenericStructDef>,
+    /// H2/M8: tracks in-progress instantiations for cycle detection
+    pub(super) instantiation_stack: HashSet<String>,
+    /// H2/M8: current instantiation nesting depth
+    pub(super) instantiation_depth: usize,
 }
 
 impl IrBuilder {
@@ -49,6 +60,8 @@ impl IrBuilder {
             enum_payload_types: HashMap::new(),
             generic_fns: HashMap::new(),
             generic_structs: HashMap::new(),
+            instantiation_stack: HashSet::new(),
+            instantiation_depth: 0,
         }
     }
 
@@ -61,6 +74,8 @@ impl IrBuilder {
         self.enum_payload_types.clear();
         self.generic_fns.clear();
         self.generic_structs.clear();
+        self.instantiation_stack.clear();
+        self.instantiation_depth = 0;
         self.declare_c_runtime(ctx);
         for stmt in stmts {
             self.build_stmt(stmt, ctx)?;

@@ -81,12 +81,23 @@ impl<'ctx> LlvmContext<'ctx> {
     }
 
     /// Save variables and types for later restore (used by monomorphization)
-    pub fn save_variables(&self) -> (HashMap<String, PointerValue<'ctx>>, HashMap<String, LeoType>) {
+    pub fn save_variables(
+        &self,
+    ) -> (
+        HashMap<String, PointerValue<'ctx>>,
+        HashMap<String, LeoType>,
+    ) {
         (self.variables.clone(), self.types.clone())
     }
 
     /// Restore previously saved variables and types
-    pub fn restore_variables(&mut self, saved: (HashMap<String, PointerValue<'ctx>>, HashMap<String, LeoType>)) {
+    pub fn restore_variables(
+        &mut self,
+        saved: (
+            HashMap<String, PointerValue<'ctx>>,
+            HashMap<String, LeoType>,
+        ),
+    ) {
         self.variables = saved.0;
         self.types = saved.1;
     }
@@ -124,10 +135,6 @@ impl<'ctx> LlvmContext<'ctx> {
         self.types.get(name)
     }
 
-    pub fn clear_types(&mut self) {
-        self.types.clear();
-    }
-
     pub fn register_fn_return_type(&mut self, name: String, ty: LeoType) {
         self.fn_return_types.insert(name, ty);
     }
@@ -146,13 +153,6 @@ impl<'ctx> LlvmContext<'ctx> {
 
     pub fn is_string_var(&self, name: &str) -> bool {
         self.types.get(name).map(|t| t.is_string()).unwrap_or(false)
-    }
-
-    pub fn write_bitcode(&self, path: &str) -> Result<(), String> {
-        self.module
-            .write_bitcode_to_path(path.as_ref())
-            .then_some(())
-            .ok_or_else(|| format!("failed to write bitcode to {}", path))
     }
 
     pub fn print_module(&self) -> String {

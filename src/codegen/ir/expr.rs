@@ -1,10 +1,10 @@
 use super::*;
+use crate::ast::expr::{BinOp, Expr, UnOp};
 use crate::codegen::ir::types::TypedValue;
-use crate::ast::expr::{BinOp, Expr};
-use crate::common::types::LeoType;
 use crate::common::error::{ErrorCode, ErrorKind, LeoError, LeoResult};
-use inkwell::AddressSpace;
+use crate::common::types::LeoType;
 use inkwell::values::BasicValueEnum;
+use inkwell::AddressSpace;
 
 impl IrBuilder {
     pub(super) fn eval_and_emit(&mut self, expr: &Expr, ctx: &mut LlvmContext) -> LeoResult<()> {
@@ -20,7 +20,20 @@ impl IrBuilder {
                     self.emit_print_str_ptr(tv.value.into_pointer_value(), ctx)?;
                 } else if tv.ty.is_float() {
                     // fall back print for now, float printing will be properly added in Phase 2 stdlib
-                    let as_int = ctx.builder().build_float_to_signed_int(tv.value.into_float_value(), ctx.module().get_context().i64_type(), "fptosi").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "fptosi float".into()))?;
+                    let as_int = ctx
+                        .builder()
+                        .build_float_to_signed_int(
+                            tv.value.into_float_value(),
+                            ctx.module().get_context().i64_type(),
+                            "fptosi",
+                        )
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "fptosi float".into(),
+                            )
+                        })?;
                     self.emit_print_int(as_int, ctx)?;
                 } else {
                     self.emit_print_int(tv.value.into_int_value(), ctx)?;
@@ -48,7 +61,7 @@ impl IrBuilder {
                 format!("undefined variable: {}", name),
             )
         })?;
-        let ty = ctx.get_type(name).cloned().unwrap_or(LeoType::I64);
+        let ty = ctx.get_type(name).cloned().unwrap_or(LeoType::Unknown);
         let loaded = ctx.builder().build_load(ptr, name).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
@@ -66,9 +79,21 @@ impl IrBuilder {
     ) -> LeoResult<TypedValue<'a>> {
         match expr {
             Expr::Number(n, _) => Ok(TypedValue::new(
-                BasicValueEnum::IntValue(ctx.module().get_context().i64_type().const_int(*n as u64, false)),
+                BasicValueEnum::IntValue(
+                    ctx.module()
+                        .get_context()
+                        .i64_type()
+                        .const_int(*n as u64, false),
+                ),
                 LeoType::I64,
             )),
+            Expr::IntLiteral(n, ty, _) => {
+                let int_type = Self::leo_int_type(ty, &ctx.module().get_context());
+                Ok(TypedValue::new(
+                    BasicValueEnum::IntValue(Self::const_int_value(int_type, *n)),
+                    ty.clone(),
+                ))
+            }
             Expr::Bool(b, _) => {
                 let i1_type = ctx.module().get_context().bool_type();
                 Ok(TypedValue::new(
@@ -90,12 +115,29 @@ impl IrBuilder {
                     LeoType::F64,
                 ))
             }
+            Expr::FloatLiteral(f, ty, _) => {
+                let context = ctx.module().get_context();
+                let float_value = if *ty == LeoType::F32 {
+                    context.f32_type().const_float(*f)
+                } else {
+                    context.f64_type().const_float(*f)
+                };
+                Ok(TypedValue::new(
+                    BasicValueEnum::FloatValue(float_value),
+                    ty.clone(),
+                ))
+            }
             Expr::Ident(name, _) => self.load_ident(name, ctx),
             Expr::Binary(op, left, right, _) => {
                 if let (Expr::Number(l, _), Expr::Number(r, _)) = (left.as_ref(), right.as_ref()) {
                     if let Some(folded) = Self::fold_constants(op, *l, *r) {
                         return Ok(TypedValue::new(
-                            BasicValueEnum::IntValue(ctx.module().get_context().i64_type().const_int(folded as u64, false)),
+                            BasicValueEnum::IntValue(
+                                ctx.module()
+                                    .get_context()
+                                    .i64_type()
+                                    .const_int(folded as u64, false),
+                            ),
                             LeoType::I64,
                         ));
                     }
@@ -104,10 +146,16 @@ impl IrBuilder {
                     return self.eval_float_binop(op, left, right, ctx);
                 }
                 if let Some(result) = self.try_string_compare(op, left, right, ctx)? {
-                    return Ok(TypedValue::new(BasicValueEnum::IntValue(result), LeoType::Bool));
+                    return Ok(TypedValue::new(
+                        BasicValueEnum::IntValue(result),
+                        LeoType::Bool,
+                    ));
                 }
                 if let Some(result) = self.try_string_concat(op, left, right, ctx)? {
-                    return Ok(TypedValue::new(BasicValueEnum::IntValue(result), LeoType::Str));
+                    return Ok(TypedValue::new(
+                        BasicValueEnum::IntValue(result),
+                        LeoType::Str,
+                    ));
                 }
                 if matches!(op, BinOp::And | BinOp::Or) {
                     return self.eval_short_circuit(op, left, right, ctx);
@@ -124,9 +172,7 @@ impl IrBuilder {
                 if !type_args.is_empty() {
                     if let Expr::Ident(name, span) = callee.as_ref() {
                         if self.generic_fns.contains_key(name) {
-                            let mangled = self.instantiate_generic_fn(
-                                name, type_args, ctx,
-                            )?;
+                            let mangled = self.instantiate_generic_fn(name, type_args, ctx)?;
                             let mangled_callee = Expr::Ident(mangled, *span);
                             return self.eval_call(&mangled_callee, args, ctx);
                         }
@@ -136,31 +182,55 @@ impl IrBuilder {
             }
             Expr::String(s, _) => {
                 let gv = self.emit_string_global(s, ctx);
-                let i8_ptr = ctx.module().get_context().i8_type().ptr_type(AddressSpace::default());
+                let i8_ptr = ctx
+                    .module()
+                    .get_context()
+                    .i8_type()
+                    .ptr_type(AddressSpace::default());
                 let ptr = gv.as_pointer_value().const_cast(i8_ptr);
-                Ok(TypedValue::new(BasicValueEnum::PointerValue(ptr), LeoType::Str))
+                Ok(TypedValue::new(
+                    BasicValueEnum::PointerValue(ptr),
+                    LeoType::Str,
+                ))
             }
             Expr::Index(obj, idx, _) => {
                 let val = self.eval_index(obj, idx, ctx)?;
-                // FIXME: Proper type inference for index
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::I64))
+                let elem_ty = self.infer_index_type(obj, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), elem_ty))
             }
             Expr::Select(obj, field, _) => {
                 let val = self.eval_select(obj, field, ctx)?;
-                // FIXME: Proper type inference for select
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::I64))
+                let field_ty = self.infer_select_type(obj, field, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), field_ty))
             }
             Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => {
                 let val = self.eval_array_alloc(expr, ctx)?;
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::Ptr)) // Should be Array(..)
+                let arr_ty = self.infer_array_type(expr, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), arr_ty))
             }
-            Expr::StructInit(_, _, _, _) => {
+            Expr::Tuple(elems, _) => {
+                let val = self.eval_tuple_alloc(elems, ctx)?;
+                let tuple_ty = LeoType::Tuple(
+                    elems
+                        .iter()
+                        .map(|elem| self.infer_expr_type(elem, ctx))
+                        .collect(),
+                );
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), tuple_ty))
+            }
+            Expr::StructInit(name, _, type_args, _) => {
                 let val = self.eval_struct_init(expr, ctx)?;
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::Ptr)) // Should be Struct(..)
+                let struct_ty = if !type_args.is_empty() {
+                    LeoType::Struct(Self::mangle_generic_name(name, type_args))
+                } else {
+                    LeoType::Struct(name.clone())
+                };
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), struct_ty))
             }
             Expr::Match(scrutinee, arms, _) => {
                 let val = self.eval_match(scrutinee, arms, ctx)?;
-                Ok(TypedValue::new(BasicValueEnum::IntValue(val), LeoType::I64)) // FIXME
+                let match_ty = self.infer_match_type(arms, ctx);
+                Ok(TypedValue::new(BasicValueEnum::IntValue(val), match_ty))
             }
             _ => Err(LeoError::new(
                 ErrorKind::Syntax,
@@ -192,21 +262,25 @@ impl IrBuilder {
             BasicValueEnum::IntValue(iv) => {
                 let bit_width = iv.get_type().get_bit_width();
                 if bit_width < 64 {
-                    ctx.builder().build_int_z_extend(iv, i64_type, "zext64").map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "zext to i64 failed".into(),
-                        )
-                    })
+                    ctx.builder()
+                        .build_int_z_extend(iv, i64_type, "zext64")
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "zext to i64 failed".into(),
+                            )
+                        })
                 } else if bit_width > 64 {
-                    ctx.builder().build_int_truncate(iv, i64_type, "trunc64").map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "trunc to i64 failed".into(),
-                        )
-                    })
+                    ctx.builder()
+                        .build_int_truncate(iv, i64_type, "trunc64")
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "trunc to i64 failed".into(),
+                            )
+                        })
                 } else {
                     Ok(iv)
                 }
@@ -254,7 +328,10 @@ impl IrBuilder {
                     return Ok(TypedValue::new(BasicValueEnum::IntValue(ptr), LeoType::Ptr));
                 }
                 if let Some(res) = self.try_dispatch_builtin(func_name.as_str(), args, ctx)? {
-                    let ret_ty = ctx.get_fn_return_type(func_name.as_str()).cloned().unwrap_or(LeoType::I64);
+                    let ret_ty = ctx
+                        .get_fn_return_type(func_name.as_str())
+                        .cloned()
+                        .unwrap_or(LeoType::Unknown);
                     return Ok(TypedValue::new(BasicValueEnum::IntValue(res), ret_ty));
                 }
                 let func = ctx.get_function(&func_name).ok_or_else(|| {
@@ -296,7 +373,10 @@ impl IrBuilder {
                         format!("{} returned void", func_name),
                     )
                 })?;
-let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64);
+                let ret_ty = ctx
+                    .get_fn_return_type(&func_name)
+                    .cloned()
+                    .unwrap_or(LeoType::Unknown);
                 Ok(TypedValue::new(ret, ret_ty))
             }
             Expr::Select(obj, method, _) => self.eval_method_call(obj, method, args, ctx),
@@ -308,86 +388,186 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
         }
     }
 
-    fn coerce_arg_to_type<'a>(
+    pub(super) fn coerce_arg_to_type<'a>(
         &self,
         tv: TypedValue<'a>,
         target_type: &LeoType,
         ctx: &mut LlvmContext<'a>,
     ) -> LeoResult<BasicValueEnum<'a>> {
         let context = ctx.module().get_context();
-        if target_type.is_float() && (tv.ty == LeoType::I64 || tv.ty == LeoType::I32 || tv.ty == LeoType::Bool) {
-            return Ok(ctx.builder().build_signed_int_to_float(tv.value.into_int_value(), context.f64_type(), "arg.fptosi").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "float conv fail".into()))?.into());
-        }
-        if (*target_type == LeoType::I64 || *target_type == LeoType::I32 || *target_type == LeoType::Bool) && tv.ty.is_float() {
-            return Ok(ctx.builder().build_float_to_signed_int(tv.value.into_float_value(), context.i64_type(), "arg.sitofp").map_err(|_| LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "int conv fail".into()))?.into());
-        }
-        if tv.ty == *target_type || (tv.value.is_pointer_value() && (target_type.is_string() || *target_type == LeoType::Ptr)) {
+        // Same type — no coercion needed
+        if tv.ty == *target_type {
             return Ok(tv.value);
         }
-        let val = tv.value.into_int_value(); // fallback for previous truncation logic
-
-        match target_type {
-            LeoType::Str | LeoType::Ptr => {
-                let i8_ptr = context.i8_type().ptr_type(AddressSpace::default());
-                ctx.builder()
-                    .build_int_to_ptr(val, i8_ptr, "arg.as_ptr")
+        // Pointer passthrough
+        if tv.value.is_pointer_value() && (target_type.is_string() || *target_type == LeoType::Ptr)
+        {
+            return Ok(tv.value);
+        }
+        // Int → Float
+        if target_type.is_float() && tv.ty.is_integer() {
+            let float_ty = if *target_type == LeoType::F32 {
+                context.f32_type()
+            } else {
+                context.f64_type()
+            };
+            return ctx
+                .builder()
+                .build_signed_int_to_float(tv.value.into_int_value(), float_ty, "arg.itof")
+                .map(BasicValueEnum::from)
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "int_to_float coercion failed".into(),
+                    )
+                });
+        }
+        // Float → Int
+        if target_type.is_integer() && tv.ty.is_float() {
+            let int_ty = Self::leo_int_type(target_type, &context);
+            return ctx
+                .builder()
+                .build_float_to_signed_int(tv.value.into_float_value(), int_ty, "arg.ftoi")
+                .map(BasicValueEnum::from)
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "float_to_int coercion failed".into(),
+                    )
+                });
+        }
+        // F32 ↔ F64
+        if tv.ty.is_float() && target_type.is_float() {
+            let fv = tv.value.into_float_value();
+            if *target_type == LeoType::F64 {
+                return ctx
+                    .builder()
+                    .build_float_ext(fv, context.f64_type(), "arg.fext")
                     .map(BasicValueEnum::from)
                     .map_err(|_| {
                         LeoError::new(
                             ErrorKind::Syntax,
                             ErrorCode::CodegenLLVMError,
-                            "int_to_ptr for arg failed".into(),
+                            "float ext failed".into(),
                         )
-                    })
-            }
-            LeoType::F64 => {
-                let f64_type = context.f64_type();
-                ctx.builder()
-                    .build_signed_int_to_float(val, f64_type, "arg.as_f64")
+                    });
+            } else {
+                return ctx
+                    .builder()
+                    .build_float_trunc(fv, context.f32_type(), "arg.ftrunc")
                     .map(BasicValueEnum::from)
                     .map_err(|_| {
                         LeoError::new(
                             ErrorKind::Syntax,
                             ErrorCode::CodegenLLVMError,
-                            "int_to_float for arg failed".into(),
+                            "float trunc failed".into(),
                         )
-                    })
+                    });
             }
-            LeoType::Bool | LeoType::Char => {
-                let target = if matches!(target_type, LeoType::Bool) {
-                    context.i8_type()
+        }
+        // Int → Ptr
+        if matches!(target_type, LeoType::Str | LeoType::Ptr) && tv.ty.is_integer() {
+            let i8_ptr = context.i8_type().ptr_type(AddressSpace::default());
+            return ctx
+                .builder()
+                .build_int_to_ptr(tv.value.into_int_value(), i8_ptr, "arg.as_ptr")
+                .map(BasicValueEnum::from)
+                .map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::CodegenLLVMError,
+                        "int_to_ptr for arg failed".into(),
+                    )
+                });
+        }
+        // Int → Int (trunc or zext)
+        if target_type.is_integer() && tv.ty.is_integer() {
+            let val = tv.value.into_int_value();
+            let target_llvm = Self::leo_int_type(target_type, &context);
+            let src_bits = val.get_type().get_bit_width();
+            let dst_bits = target_llvm.get_bit_width();
+            if src_bits == dst_bits {
+                return Ok(BasicValueEnum::from(val));
+            } else if src_bits > dst_bits {
+                return ctx
+                    .builder()
+                    .build_int_truncate(val, target_llvm, "arg.trunc")
+                    .map(BasicValueEnum::from)
+                    .map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::CodegenLLVMError,
+                            "int truncate failed".into(),
+                        )
+                    });
+            } else {
+                // Widen: sign decided by SOURCE type, not target type
+                let is_unsigned = matches!(
+                    tv.ty,
+                    LeoType::U8
+                        | LeoType::U16
+                        | LeoType::U32
+                        | LeoType::U64
+                        | LeoType::U128
+                        | LeoType::USize
+                );
+                if is_unsigned {
+                    return ctx
+                        .builder()
+                        .build_int_z_extend(val, target_llvm, "arg.zext")
+                        .map(BasicValueEnum::from)
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "int zext failed".into(),
+                            )
+                        });
                 } else {
-                    context.i8_type()
-                };
-                let truncated = ctx
-                    .builder()
-                    .build_int_truncate(val, target, "arg.trunc")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "truncate arg failed".into(),
-                        )
-                    })?;
-                Ok(BasicValueEnum::from(truncated))
+                    return ctx
+                        .builder()
+                        .build_int_s_extend(val, target_llvm, "arg.sext")
+                        .map(BasicValueEnum::from)
+                        .map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Syntax,
+                                ErrorCode::CodegenLLVMError,
+                                "int sext failed".into(),
+                            )
+                        });
+                }
             }
-            LeoType::I32 => {
-                let truncated = ctx
-                    .builder()
-                    .build_int_truncate(val, context.i32_type(), "arg.trunc32")
-                    .map_err(|_| {
-                        LeoError::new(
-                            ErrorKind::Syntax,
-                            ErrorCode::CodegenLLVMError,
-                            "truncate arg to i32 failed".into(),
-                        )
-                    })?;
-                Ok(BasicValueEnum::from(truncated))
-            }
-            _ => Ok(BasicValueEnum::from(val)),
+        }
+        // Fallback — pass through unchanged
+        Ok(tv.value)
+    }
+
+    /// Map LeoType integer variants to LLVM IntType.
+    fn leo_int_type<'ctx>(
+        ty: &LeoType,
+        context: &inkwell::context::ContextRef<'ctx>,
+    ) -> inkwell::types::IntType<'ctx> {
+        match ty {
+            LeoType::I8 | LeoType::U8 | LeoType::Char => context.i8_type(),
+            LeoType::I16 | LeoType::U16 => context.i16_type(),
+            LeoType::I32 | LeoType::U32 => context.i32_type(),
+            LeoType::I128 | LeoType::U128 => context.i128_type(),
+            LeoType::Bool => context.bool_type(),
+            _ => context.i64_type(), // I64, U64, isize, usize, and fallback
         }
     }
 
+    pub(super) fn const_int_value<'ctx>(
+        int_type: inkwell::types::IntType<'ctx>,
+        value: u128,
+    ) -> inkwell::values::IntValue<'ctx> {
+        if int_type.get_bit_width() <= 64 {
+            return int_type.const_int(value as u64, false);
+        }
+        int_type.const_int_arbitrary_precision(&[value as u64, (value >> 64) as u64])
+    }
 
     pub(super) fn eval_method_call<'a>(
         &mut self,
@@ -404,13 +584,22 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
                     if let Some(size) = self.array_sizes.get(name).copied() {
                         if self.is_string_var(name, ctx) {
                             let len_val = self.runtime_strlen(name, ctx)?;
-                            return Ok(TypedValue::new(BasicValueEnum::IntValue(len_val), LeoType::I64));
+                            return Ok(TypedValue::new(
+                                BasicValueEnum::IntValue(len_val),
+                                LeoType::I64,
+                            ));
                         }
-                        return Ok(TypedValue::new(BasicValueEnum::IntValue(i64_type.const_int(size as u64, false)), LeoType::I64));
+                        return Ok(TypedValue::new(
+                            BasicValueEnum::IntValue(i64_type.const_int(size as u64, false)),
+                            LeoType::I64,
+                        ));
                     }
                     if self.is_string_var(name, ctx) {
                         let len_val = self.runtime_strlen(name, ctx)?;
-                        return Ok(TypedValue::new(BasicValueEnum::IntValue(len_val), LeoType::I64));
+                        return Ok(TypedValue::new(
+                            BasicValueEnum::IntValue(len_val),
+                            LeoType::I64,
+                        ));
                     }
                     Err(LeoError::new(
                         ErrorKind::Syntax,
@@ -438,17 +627,22 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
                                     "strlen call failed".into(),
                                 )
                             })?;
-                        return Ok(TypedValue::new(BasicValueEnum::IntValue(result
-                            .try_as_basic_value()
-                            .left()
-                            .ok_or_else(|| {
-                                LeoError::new(
-                                    ErrorKind::Syntax,
-                                    ErrorCode::CodegenLLVMError,
-                                    "strlen void".into(),
-                                )
-                            })?
-                            .into_int_value()), LeoType::I64));
+                        return Ok(TypedValue::new(
+                            BasicValueEnum::IntValue(
+                                result
+                                    .try_as_basic_value()
+                                    .left()
+                                    .ok_or_else(|| {
+                                        LeoError::new(
+                                            ErrorKind::Syntax,
+                                            ErrorCode::CodegenLLVMError,
+                                            "strlen void".into(),
+                                        )
+                                    })?
+                                    .into_int_value(),
+                            ),
+                            LeoType::I64,
+                        ));
                     }
                     Err(LeoError::new(
                         ErrorKind::Syntax,
@@ -456,8 +650,14 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
                         ".len() on select: not a string field".into(),
                     ))
                 }
-                Expr::String(s, _) => Ok(TypedValue::new(BasicValueEnum::IntValue(i64_type.const_int(s.len() as u64, false)), LeoType::I64)),
-                Expr::Array(elems, _) => Ok(TypedValue::new(BasicValueEnum::IntValue(i64_type.const_int(elems.len() as u64, false)), LeoType::I64)),
+                Expr::String(s, _) => Ok(TypedValue::new(
+                    BasicValueEnum::IntValue(i64_type.const_int(s.len() as u64, false)),
+                    LeoType::I64,
+                )),
+                Expr::Array(elems, _) => Ok(TypedValue::new(
+                    BasicValueEnum::IntValue(i64_type.const_int(elems.len() as u64, false)),
+                    LeoType::I64,
+                )),
                 _ => Err(LeoError::new(
                     ErrorKind::Syntax,
                     ErrorCode::CodegenLLVMError,
@@ -513,7 +713,10 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
                                     format!("method {} returned void", mangled),
                                 )
                             })?;
-                            let ret_ty = ctx.get_fn_return_type(&mangled).cloned().unwrap_or(LeoType::I64);
+                            let ret_ty = ctx
+                                .get_fn_return_type(&mangled)
+                                .cloned()
+                                .unwrap_or(LeoType::Unknown);
                             return Ok(TypedValue::new(ret, ret_ty));
                         }
                     }
@@ -567,8 +770,6 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
             .into_int_value())
     }
 
-
-
     pub(super) fn expr_is_string(&self, expr: &Expr, ctx: &LlvmContext) -> bool {
         match expr {
             Expr::String(_, _) => true,
@@ -611,19 +812,14 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
         }
     }
 
-
-
     fn expr_is_float(&self, expr: &Expr, ctx: &LlvmContext) -> bool {
         match expr {
-            Expr::Float(_, _) => true,
-            Expr::Ident(name, _) => ctx
-                .get_type(name)
-                .map(|t| matches!(t, LeoType::F64))
-                .unwrap_or(false),
+            Expr::Float(_, _) | Expr::FloatLiteral(_, _, _) => true,
+            Expr::Ident(name, _) => ctx.get_type(name).map(|t| t.is_float()).unwrap_or(false),
             Expr::Call(callee, _, _, _) => {
                 if let Expr::Ident(fn_name, _) = callee.as_ref() {
                     ctx.get_fn_return_type(fn_name)
-                        .map(|t| matches!(t, LeoType::F64))
+                        .map(|t| t.is_float())
                         .unwrap_or(false)
                 } else {
                     false
@@ -636,7 +832,17 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
         }
     }
 
-
+    fn infer_float_result_type(&self, left: &Expr, right: &Expr, ctx: &LlvmContext) -> LeoType {
+        let left_ty = self.infer_expr_type(left, ctx);
+        let right_ty = self.infer_expr_type(right, ctx);
+        if left_ty == LeoType::F64 || right_ty == LeoType::F64 {
+            LeoType::F64
+        } else if left_ty == LeoType::F32 || right_ty == LeoType::F32 {
+            LeoType::F32
+        } else {
+            LeoType::F64
+        }
+    }
 
     pub(super) fn is_string_var(&self, name: &str, ctx: &LlvmContext) -> bool {
         ctx.is_string_var(name)
@@ -657,5 +863,205 @@ let ret_ty = ctx.get_fn_return_type(&func_name).cloned().unwrap_or(LeoType::I64)
             }
         }
         ctx.is_string_var(field)
+    }
+
+    /// Resolve the struct type name of an expression, if known.
+    fn expr_struct_type(&self, expr: &Expr, ctx: &LlvmContext) -> Option<String> {
+        match expr {
+            Expr::Ident(name, _) => self.var_types.get(name).cloned(),
+            Expr::Select(inner_obj, field, _) => {
+                if let LeoType::Struct(name) = self.infer_select_type(inner_obj, field, ctx) {
+                    Some(name)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Infer the element type of an index expression (arr[i] or s[i]).
+    pub(super) fn infer_index_type(&self, obj: &Expr, ctx: &LlvmContext) -> LeoType {
+        if self.expr_is_string(obj, ctx) {
+            return LeoType::Char;
+        }
+        match obj {
+            Expr::Ident(name, _) => {
+                if let Some(ty) = ctx.get_type(name) {
+                    match ty {
+                        LeoType::Array(elem, _) => return *elem.clone(),
+                        LeoType::Vec(elem) => return *elem.clone(),
+                        LeoType::Str => return LeoType::Char,
+                        _ => {}
+                    }
+                }
+            }
+            // obj.field[i] — element type of the field
+            Expr::Select(inner_obj, field, _) => {
+                let field_ty = self.infer_select_type(inner_obj, field, ctx);
+                match field_ty {
+                    LeoType::Array(elem, _) => return *elem,
+                    LeoType::Vec(elem) => return *elem,
+                    LeoType::Str => return LeoType::Char,
+                    _ => {}
+                }
+            }
+            // matrix[i][j] — element type of the inner element
+            Expr::Index(inner_obj, _, _) => {
+                let inner_elem = self.infer_index_type(inner_obj, ctx);
+                match inner_elem {
+                    LeoType::Array(elem, _) => return *elem,
+                    LeoType::Vec(elem) => return *elem,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        LeoType::Unknown
+    }
+
+    /// Infer the type of a field access (obj.field).
+    pub(super) fn infer_select_type(&self, obj: &Expr, field: &str, ctx: &LlvmContext) -> LeoType {
+        if field == "len" {
+            return LeoType::I64;
+        }
+        if let Some(struct_name) = self.expr_struct_type(obj, ctx) {
+            if let Some(field_types) = self.struct_field_types.get(&struct_name) {
+                if let Some(fields) = self.struct_fields.get(&struct_name) {
+                    if let Some(idx) = fields.iter().position(|f| f == field) {
+                        if let Some(ty_str) = field_types.get(idx) {
+                            return LeoType::from_str(ty_str);
+                        }
+                    }
+                }
+            }
+        }
+        LeoType::Unknown
+    }
+
+    /// Infer the return type of a match expression by scanning all arms.
+    pub(super) fn infer_match_type(&self, arms: &[(Expr, Expr)], ctx: &LlvmContext) -> LeoType {
+        // Return the first arm type that is more specific than an unknown/unit fallback.
+        for (_, body) in arms {
+            let ty = self.infer_expr_type(body, ctx);
+            if ty != LeoType::Unknown && ty != LeoType::Unit {
+                return ty;
+            }
+        }
+        arms.first()
+            .map(|(_, body)| self.infer_expr_type(body, ctx))
+            .unwrap_or(LeoType::Unknown)
+    }
+
+    /// Infer the type of an array literal or array repeat expression.
+    fn infer_array_type(&self, expr: &Expr, ctx: &LlvmContext) -> LeoType {
+        match expr {
+            Expr::Array(elems, _) => {
+                let elem_ty = if let Some(first) = elems.first() {
+                    self.infer_expr_type(first, ctx)
+                } else {
+                    LeoType::Unknown
+                };
+                LeoType::Array(Box::new(elem_ty), elems.len())
+            }
+            Expr::ArrayRepeat(val, count, _) => {
+                let elem_ty = self.infer_expr_type(val, ctx);
+                let size = if let Expr::Number(n, _) = count.as_ref() {
+                    *n as usize
+                } else {
+                    0
+                };
+                LeoType::Array(Box::new(elem_ty), size)
+            }
+            _ => LeoType::Unknown,
+        }
+    }
+
+    /// Lightweight type inference for an expression (no code generation).
+    pub(super) fn infer_expr_type(&self, expr: &Expr, ctx: &LlvmContext) -> LeoType {
+        match expr {
+            Expr::Number(_, _) => LeoType::I64,
+            Expr::IntLiteral(_, ty, _) => ty.clone(),
+            Expr::Float(_, _) => LeoType::F64,
+            Expr::FloatLiteral(_, ty, _) => ty.clone(),
+            Expr::Bool(_, _) => LeoType::Bool,
+            Expr::Char(_, _) => LeoType::Char,
+            Expr::String(_, _) => LeoType::Str,
+            Expr::Unit(_) => LeoType::Unit,
+            Expr::Tuple(elems, _) => LeoType::Tuple(
+                elems
+                    .iter()
+                    .map(|elem| self.infer_expr_type(elem, ctx))
+                    .collect(),
+            ),
+            Expr::Ident(name, _) => ctx
+                .get_type(name)
+                .cloned()
+                .or_else(|| ctx.get_enum(name).map(|_| LeoType::Enum(name.clone())))
+                .unwrap_or(LeoType::Unknown),
+            Expr::Unary(op, inner, _) => match op {
+                UnOp::Not => LeoType::Bool,
+                _ => self.infer_expr_type(inner, ctx),
+            },
+            Expr::Call(callee, _, _, _) => {
+                if let Expr::Ident(fn_name, _) = callee.as_ref() {
+                    ctx.get_fn_return_type(fn_name)
+                        .cloned()
+                        .unwrap_or(LeoType::Unknown)
+                } else {
+                    LeoType::Unknown
+                }
+            }
+            Expr::Binary(op, left, right, _) => match op {
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or => LeoType::Bool,
+                BinOp::Add => {
+                    if self.expr_is_string(left, ctx) || self.expr_is_string(right, ctx) {
+                        LeoType::Str
+                    } else if self.expr_is_float(left, ctx) || self.expr_is_float(right, ctx) {
+                        self.infer_float_result_type(left, right, ctx)
+                    } else {
+                        LeoType::I64
+                    }
+                }
+                _ => {
+                    if self.expr_is_float(left, ctx) || self.expr_is_float(right, ctx) {
+                        self.infer_float_result_type(left, right, ctx)
+                    } else {
+                        LeoType::I64
+                    }
+                }
+            },
+            Expr::Index(obj, _, _) => self.infer_index_type(obj, ctx),
+            Expr::Select(obj, field, _) => self.infer_select_type(obj, field, ctx),
+            Expr::Match(_, arms, _) => self.infer_match_type(arms, ctx),
+            Expr::StructInit(name, _, _, _) => LeoType::Struct(name.clone()),
+            Expr::Array(elems, _) => {
+                let elem_ty = if let Some(first) = elems.first() {
+                    self.infer_expr_type(first, ctx)
+                } else {
+                    LeoType::Unknown
+                };
+                LeoType::Array(Box::new(elem_ty), elems.len())
+            }
+            Expr::If(_, then, else_opt, _) => {
+                if else_opt.is_some() {
+                    self.infer_expr_type(then, ctx)
+                } else {
+                    LeoType::Unit
+                }
+            }
+            Expr::Block(exprs, _) => exprs
+                .last()
+                .map(|e| self.infer_expr_type(e, ctx))
+                .unwrap_or(LeoType::Unit),
+            _ => LeoType::Unknown,
+        }
     }
 }

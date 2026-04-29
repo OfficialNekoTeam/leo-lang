@@ -4,7 +4,9 @@ use crate::common::span::Span;
 pub enum Token {
     Identifier(String),
     Number(i64),
+    TypedNumber(u128, String),
     Float(f64),
+    TypedFloat(f64, String),
     String(String),
     /// Single character literal, e.g. 'a'
     Char(char),
@@ -95,27 +97,9 @@ pub enum Symbol {
     RightShift,
 }
 
-impl Token {
-    pub fn is_keyword(&self) -> bool {
-        matches!(self, Token::Keyword(_))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_token_keyword() {
-        let token = Token::Keyword(Keyword::Fn);
-        assert!(token.is_keyword());
-    }
-
-    #[test]
-    fn test_token_not_keyword() {
-        let token = Token::Identifier("foo".to_string());
-        assert!(!token.is_keyword());
-    }
 
     #[test]
     fn test_token_with_span() {

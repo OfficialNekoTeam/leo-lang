@@ -1,7 +1,7 @@
 //! LeoLang 编译器库
-//! 
+//!
 //! # 模块结构
-//! 
+//!
 //! - `common`: 通用工具（错误、源码位置）
 //! - `lexer`: 词法分析
 //! - `parser`: 语法分析  
@@ -12,13 +12,13 @@
 //! - `llvm`: LLVM 接口封装
 //! - `compiler`: 编译流程
 
-pub mod cli;
-pub mod common;
-pub mod lexer;
-pub mod parser;
 pub mod ast;
-pub mod sema;
-pub mod lint;
+pub mod cli;
 pub mod codegen;
-pub mod llvm;
+pub mod common;
 pub mod compiler;
+pub mod lexer;
+pub mod lint;
+pub mod llvm;
+pub mod parser;
+pub mod sema;

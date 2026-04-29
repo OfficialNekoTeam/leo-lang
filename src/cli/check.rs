@@ -3,8 +3,7 @@ use std::fs;
 /// Type-check project without generating code
 pub fn check() -> Result<(), String> {
     let entry = read_entry()?;
-    let source = fs::read_to_string(&entry)
-        .map_err(|e| format!("read {} failed: {}", entry, e))?;
+    let source = fs::read_to_string(&entry).map_err(|e| format!("read {} failed: {}", entry, e))?;
 
     let mut lexer = crate::lexer::Lexer::new(&source);
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
@@ -18,8 +17,8 @@ pub fn check() -> Result<(), String> {
 
 /// Read entry point from leo.toml
 fn read_entry() -> Result<String, String> {
-    let content = fs::read_to_string("leo.toml")
-        .map_err(|e| format!("read leo.toml failed: {}", e))?;
+    let content =
+        fs::read_to_string("leo.toml").map_err(|e| format!("read leo.toml failed: {}", e))?;
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("entry = ") {
@@ -27,12 +26,4 @@ fn read_entry() -> Result<String, String> {
         }
     }
     Err("entry not found in leo.toml".into())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_check_module_exists() {
-        assert!(true);
-    }
 }

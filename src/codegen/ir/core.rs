@@ -11,12 +11,9 @@ impl IrBuilder {
         let i32_type = ctx.module().get_context().i32_type();
         let void_type = ctx.module().get_context().void_type();
         ctx.module_mut()
-            .add_function("puts", i8_ptr.fn_type(&[], false), None);
-        ctx.module_mut().add_function(
-            "printf",
-            i32_type.fn_type(&[i8_ptr.into(), i64_type.into()], true),
-            None,
-        );
+            .add_function("puts", i32_type.fn_type(&[i8_ptr.into()], false), None);
+        ctx.module_mut()
+            .add_function("printf", i32_type.fn_type(&[i8_ptr.into()], true), None);
         ctx.module_mut()
             .add_function("strlen", i64_type.fn_type(&[i8_ptr.into()], false), None);
         ctx.module_mut()
@@ -98,6 +95,18 @@ impl IrBuilder {
             i32_type.fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], true),
             None,
         );
+        // Leo builtin return types — used by infer_expr_type for type inference
+        ctx.register_fn_return_type("char_to_str".into(), LeoType::Str);
+        ctx.register_fn_return_type("to_string".into(), LeoType::Str);
+        ctx.register_fn_return_type("str_concat".into(), LeoType::Str);
+        ctx.register_fn_return_type("str_slice".into(), LeoType::Str);
+        ctx.register_fn_return_type("file_read".into(), LeoType::Str);
+        ctx.register_fn_return_type("is_digit".into(), LeoType::Bool);
+        ctx.register_fn_return_type("is_alpha".into(), LeoType::Bool);
+        ctx.register_fn_return_type("is_alnum".into(), LeoType::Bool);
+        ctx.register_fn_return_type("str_len".into(), LeoType::I64);
+        ctx.register_fn_return_type("vec_len".into(), LeoType::I64);
+        ctx.register_fn_return_type("str_char_at".into(), LeoType::Char);
     }
 
     pub(super) fn build_stmt(&mut self, stmt: &Stmt, ctx: &mut LlvmContext) -> LeoResult<()> {
@@ -140,8 +149,7 @@ impl IrBuilder {
                         .map(|(_, ty)| Self::llvm_type(ty, ctx))
                         .collect();
                     struct_type.set_body(&field_types, false);
-                    let field_names: Vec<String> =
-                        fields.iter().map(|(n, _)| n.clone()).collect();
+                    let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
                     let field_type_names: Vec<String> =
                         fields.iter().map(|(_, ty)| ty.clone()).collect();
                     self.struct_fields.insert(name.clone(), field_names);
@@ -154,13 +162,31 @@ impl IrBuilder {
                 let i32_type = context.i32_type();
                 let max_payload: u32 = variants
                     .iter()
-                    .map(|(_, payload)| {
+                    .map(|(_, payload)| -> LeoResult<u32> {
                         if payload.is_empty() {
-                            0
-                        } else {
-                            payload.len() as u32 * 8
+                            return Ok(0u32);
                         }
+                        let len: u32 = payload.len().try_into().map_err(|_| {
+                            LeoError::new(
+                                ErrorKind::Semantic,
+                                ErrorCode::CodegenLLVMError,
+                                format!(
+                                    "enum '{}': variant has too many payload fields ({})",
+                                    name,
+                                    payload.len()
+                                ),
+                            )
+                        })?;
+                        len.checked_mul(8).ok_or_else(|| {
+                            LeoError::new(
+                                ErrorKind::Semantic,
+                                ErrorCode::CodegenLLVMError,
+                                format!("enum '{}': payload size overflow", name),
+                            )
+                        })
                     })
+                    .collect::<LeoResult<Vec<u32>>>()?
+                    .into_iter()
                     .max()
                     .unwrap_or(0);
                 let payload_type = if max_payload > 0 {
@@ -172,6 +198,7 @@ impl IrBuilder {
                 enum_struct.set_body(&[i32_type.into(), payload_type], false);
                 let variant_names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
                 ctx.register_enum(name.clone(), variant_names);
+                ctx.register_type(name.clone(), LeoType::Enum(name.clone()));
                 for (vname, payload) in variants {
                     let qualified = format!("{}::{}", name, vname);
                     let types: Vec<String> = payload
@@ -207,8 +234,6 @@ impl IrBuilder {
         }
         Ok(())
     }
-
-
 
     pub(super) fn block_is_terminated(ctx: &LlvmContext) -> bool {
         ctx.builder()
@@ -296,8 +321,9 @@ impl IrBuilder {
         match ty {
             "i8" | "u8" | "char" => context.i8_type().into(),
             "i16" | "u16" => context.i16_type().into(),
-            "i32" => context.i32_type().into(),
-            "i64" => context.i64_type().into(),
+            "i32" | "u32" => context.i32_type().into(),
+            "i64" | "u64" | "isize" | "usize" => context.i64_type().into(),
+            "i128" | "u128" => context.i128_type().into(),
             "f32" => context.f32_type().into(),
             "f64" => context.f64_type().into(),
             "bool" => context.bool_type().into(),
@@ -316,8 +342,14 @@ impl IrBuilder {
     pub fn leo_type_to_llvm<'ctx>(leo: &LeoType, ctx: &LlvmContext<'ctx>) -> BasicTypeEnum<'ctx> {
         let context = ctx.module().get_context();
         match leo {
-            LeoType::I64 => context.i64_type().into(),
-            LeoType::I32 => context.i32_type().into(),
+            LeoType::I8 | LeoType::U8 => context.i8_type().into(),
+            LeoType::I16 | LeoType::U16 => context.i16_type().into(),
+            LeoType::I32 | LeoType::U32 => context.i32_type().into(),
+            LeoType::I64 | LeoType::U64 | LeoType::ISize | LeoType::USize => {
+                context.i64_type().into()
+            }
+            LeoType::I128 | LeoType::U128 => context.i128_type().into(),
+            LeoType::F32 => context.f32_type().into(),
             LeoType::F64 => context.f64_type().into(),
             LeoType::Bool => context.bool_type().into(),
             LeoType::Char => context.i8_type().into(),
@@ -339,22 +371,37 @@ impl IrBuilder {
                 }
             }
             LeoType::Vec(_) => context.i8_type().ptr_type(AddressSpace::default()).into(),
+            LeoType::Tuple(elems) => {
+                let fields = elems
+                    .iter()
+                    .map(|elem| Self::leo_type_to_llvm(elem, ctx))
+                    .collect::<Vec<_>>();
+                context.struct_type(&fields, false).into()
+            }
             LeoType::Array(elem, n) => {
                 let elem_type = Self::leo_type_to_llvm(elem, ctx);
+                // Array sizes are parsed from source literals, so usize→u32 overflow
+                // is impossible in practice; saturate rather than panic.
+                let n32: u32 = (*n).try_into().unwrap_or(u32::MAX);
                 match elem_type {
-                    BasicTypeEnum::IntType(it) => it.array_type(*n as u32).into(),
-                    BasicTypeEnum::FloatType(ft) => ft.array_type(*n as u32).into(),
-                    BasicTypeEnum::PointerType(pt) => pt.array_type(*n as u32).into(),
-                    BasicTypeEnum::StructType(st) => st.array_type(*n as u32).into(),
-                    _ => context.i64_type().array_type(*n as u32).into(),
+                    BasicTypeEnum::IntType(it) => it.array_type(n32).into(),
+                    BasicTypeEnum::FloatType(ft) => ft.array_type(n32).into(),
+                    BasicTypeEnum::PointerType(pt) => pt.array_type(n32).into(),
+                    BasicTypeEnum::StructType(st) => st.array_type(n32).into(),
+                    _ => context.i64_type().array_type(n32).into(),
                 }
             }
             LeoType::Fn(_, _) => context.i8_type().ptr_type(AddressSpace::default()).into(),
             LeoType::Unit => context.struct_type(&[], false).into(),
+            LeoType::Never => {
+                // Never type — use void-like empty struct
+                context.struct_type(&[], false).into()
+            }
             LeoType::TypeVar(_) => {
                 // Unresolved type var defaults to i64 at codegen time
                 context.i64_type().into()
             }
+            LeoType::Unknown => context.i8_type().ptr_type(AddressSpace::default()).into(),
             LeoType::Generic(name, _args) => {
                 // Look up the monomorphized struct by name
                 if let Some(st) = ctx.module().get_struct_type(name) {

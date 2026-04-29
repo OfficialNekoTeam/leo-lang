@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use crate::ast::expr::Expr;
     use crate::codegen::ir::IrBuilder;
+    use crate::common::span::Span;
+    use crate::common::types::LeoType;
     use crate::llvm::context::LlvmContext;
     use inkwell::context::Context;
 
@@ -10,6 +13,102 @@ mod tests {
         let context = Context::create();
         let mut ctx = LlvmContext::new(&context, "test");
         assert!(builder.build(&[], &mut ctx).is_ok());
+    }
+
+    #[test]
+    fn test_unknown_identifier_infers_unknown() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test_unknown_type");
+        let ty = builder.infer_expr_type(&Expr::Ident("missing".into(), Span::dummy()), &ctx);
+        assert_eq!(ty, LeoType::Unknown);
+    }
+
+    #[test]
+    fn test_unknown_call_infers_unknown() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test_unknown_call");
+        let ty = builder.infer_expr_type(
+            &Expr::Call(
+                Box::new(Expr::Ident("missing".into(), Span::dummy())),
+                vec![],
+                vec![],
+                Span::dummy(),
+            ),
+            &ctx,
+        );
+        assert_eq!(ty, LeoType::Unknown);
+    }
+
+    #[test]
+    fn test_enum_name_infers_enum_type() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_enum_type");
+        ctx.register_enum("Token".into(), vec!["Eof".into()]);
+        let ty = builder.infer_expr_type(&Expr::Ident("Token".into(), Span::dummy()), &ctx);
+        assert_eq!(ty, LeoType::Enum("Token".into()));
+    }
+
+    #[test]
+    fn test_typed_literals_infer_precise_types() {
+        let builder = IrBuilder::new();
+        let context = Context::create();
+        let ctx = LlvmContext::new(&context, "test_typed_literals");
+        assert_eq!(
+            builder.infer_expr_type(&Expr::IntLiteral(42, LeoType::U16, Span::dummy()), &ctx),
+            LeoType::U16
+        );
+        assert_eq!(
+            builder.infer_expr_type(&Expr::IntLiteral(42, LeoType::USize, Span::dummy()), &ctx),
+            LeoType::USize
+        );
+        assert_eq!(
+            builder.infer_expr_type(&Expr::FloatLiteral(1.0, LeoType::F32, Span::dummy()), &ctx),
+            LeoType::F32
+        );
+    }
+
+    #[test]
+    fn test_typed_literal_ir() {
+        let source = "fn main() {\nlet a = 255u8\nlet b = 3.5f\nlet c = 1u128\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_typed_literal_ir");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("alloca i8"),
+            "u8 literal should infer i8 storage"
+        );
+        assert!(
+            ir.contains("alloca float"),
+            "f32 literal should infer float storage"
+        );
+        assert!(
+            ir.contains("alloca i128"),
+            "u128 literal should infer i128 storage"
+        );
+    }
+
+    #[test]
+    fn test_tuple_literal_ir() {
+        let source = "fn main() {\nlet t: (i64, bool) = (1, true)\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_tuple_literal_ir");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(ir.contains("tuple_malloc"), "tuple should allocate storage");
+        assert!(
+            ir.contains("alloca i64"),
+            "tuple value should be pointer-sized"
+        );
     }
 
     #[test]
@@ -133,8 +232,12 @@ mod tests {
             ir.contains("fopen")
                 && ir.contains("fread")
                 && ir.contains("fseek")
-                && ir.contains("ftell"),
-            "file_read should use fopen+fseek+ftell+fread"
+                && ir.contains("ftell")
+                && ir.contains("file_read size invalid")
+                && ir.contains("file_read too large")
+                && ir.contains("file_fail_cond")
+                && ir.contains("fclose_fail"),
+            "file_read should validate size before fread"
         );
     }
 
@@ -245,6 +348,127 @@ fn main() {
         assert!(
             ctx.module().get_struct_type("Pair_i64").is_some(),
             "LLVM module should have Pair_i64 struct type"
+        );
+    }
+
+    // --- Audit fix tests ---
+
+    #[test]
+    fn test_match_returns_arm_value() {
+        // M4: match expression must return the matched arm's value, not 0
+        let source = "fn main() {\nlet x: i64 = match 1 { 1 => 42, _ => 99 }\nprintln(x)\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_match_val");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        assert!(
+            ir.contains("match_result"),
+            "match should use result alloca slot"
+        );
+        assert!(
+            ir.contains("store i64 42"),
+            "match arm 1 => 42 should store 42 into result"
+        );
+    }
+
+    #[test]
+    fn test_puts_printf_signatures() {
+        // M5+M6: puts must be i32(i8*), printf must NOT have hardcoded i64 second param
+        let source = "fn main() {\nprintln(42)\n}";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_sigs");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        // puts must accept i8* and return i32
+        assert!(
+            ir.contains("declare i32 @puts(ptr)") || ir.contains("declare i32 @puts(i8*)"),
+            "puts must be declared as i32(i8*), got IR: {}",
+            &ir[..ir.find("define").unwrap_or(200).min(ir.len())]
+        );
+        // printf must NOT have a hardcoded i64 second parameter
+        assert!(
+            !ir.contains("declare i32 @printf(ptr, i64")
+                && !ir.contains("declare i32 @printf(i8*, i64"),
+            "printf must not have hardcoded i64 second parameter"
+        );
+    }
+
+    #[test]
+    fn test_parser_depth_limit() {
+        // MH1: deeply nested unary expressions must fail with a clear error.
+        // Run in a thread with a large stack so debug-mode frames don't exhaust
+        // the default 2 MB stack before our 512-level guard fires.
+        let result = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024) // 32 MB
+            .spawn(|| {
+                let prefix = "fn main() { ".to_string();
+                let suffix = " }";
+                let nested: String = "!(".repeat(520) + "1" + &")".repeat(520);
+                let source = prefix + &nested + suffix;
+                let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex");
+                crate::parser::Parser::new(tokens).parse()
+            })
+            .expect("thread spawn")
+            .join()
+            .expect("thread join");
+        assert!(
+            result.is_err(),
+            "deeply nested expression should fail parsing"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("nested too deeply"),
+            "error should mention nesting depth, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_zext_not_sext_for_unsigned() {
+        // zext/sext: widening a u8 to i64 must use zero-extend, not sign-extend
+        // u8 value 200 widened to i64 should be 200, not -56 (signed interpretation)
+        let source = "fn foo(x: u8) -> i64 { return x }\nfn main() { println(foo(200)) }";
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let stmts = crate::parser::Parser::new(tokens).parse().expect("parse");
+        let context = Context::create();
+        let mut ctx = LlvmContext::new(&context, "test_zext");
+        let mut builder = IrBuilder::new();
+        builder.build(&stmts, &mut ctx).expect("build");
+        let ir = ctx.print_module();
+        // Should contain zext for unsigned widening, not sext
+        assert!(
+            ir.contains("zext") || !ir.contains("sext i8"),
+            "widening u8→i64 must use zext, not sext: {}",
+            &ir[..300.min(ir.len())]
+        );
+    }
+
+    #[test]
+    fn test_temp_path_not_fixed() {
+        // H3: the generated temp path must not be the old fixed /tmp/leo_run_tmp
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock ok")
+            .subsec_nanos();
+        let path = format!(
+            "{}/leo_run_{}_{}",
+            std::env::temp_dir().display(),
+            std::process::id(),
+            nanos
+        );
+        assert_ne!(
+            path, "/tmp/leo_run_tmp",
+            "temp path must not be the fixed old value"
+        );
+        assert!(
+            path.contains("leo_run_"),
+            "temp path must contain leo_run_ prefix"
         );
     }
 }

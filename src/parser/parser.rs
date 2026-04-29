@@ -3,16 +3,24 @@ use crate::ast::stmt::Stmt;
 use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult, Span};
 use crate::lexer::token::{Keyword, Symbol, Token, TokenWithSpan};
 
+/// Maximum expression nesting depth to prevent stack overflow
+const MAX_PARSE_DEPTH: usize = 512;
+
 /// Recursive descent parser with Pratt expression parsing
 pub struct Parser {
     tokens: Vec<TokenWithSpan>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
     /// Create parser from token stream
     pub fn new(tokens: Vec<TokenWithSpan>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     /// Parse full program into statement list
@@ -72,6 +80,91 @@ impl Parser {
                 Ok(s)
             }
             _ => Err(self.unexpected(tws)),
+        }
+    }
+
+    /// Parse a type annotation — handles ident, [T; N], Name<T, U>, fn(T) -> U.
+    fn parse_type_annotation(&mut self) -> LeoResult<String> {
+        if self.match_kw(Keyword::Fn) {
+            self.expect_sym(Symbol::LeftParen)?;
+            let mut params = Vec::new();
+            while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                params.push(self.parse_type_annotation()?);
+                if !self.match_sym(Symbol::Comma) {
+                    break;
+                }
+            }
+            self.expect_sym(Symbol::RightParen)?;
+            self.expect_sym(Symbol::Arrow)?;
+            let ret = self.parse_type_annotation()?;
+            return Ok(format!("fn({}) -> {}", params.join(", "), ret));
+        }
+        // Tuple type: (), (T,), (A, B)
+        if self.match_sym(Symbol::LeftParen) {
+            if self.match_sym(Symbol::RightParen) {
+                return Ok("unit".into());
+            }
+            let first = self.parse_type_annotation()?;
+            if !self.match_sym(Symbol::Comma) {
+                self.expect_sym(Symbol::RightParen)?;
+                return Ok(first);
+            }
+            let mut elems = vec![first];
+            while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                elems.push(self.parse_type_annotation()?);
+                if !self.match_sym(Symbol::Comma) {
+                    break;
+                }
+            }
+            self.expect_sym(Symbol::RightParen)?;
+            if elems.len() == 1 {
+                return Ok(format!("({},)", elems[0]));
+            }
+            return Ok(format!("({})", elems.join(", ")));
+        }
+        // Array type: [T; N]
+        if self.match_sym(Symbol::LeftBracket) {
+            let elem = self.parse_type_annotation()?;
+            self.expect_sym(Symbol::Semicolon)?;
+            let size = match self.peek().map(|t| t.token.clone()) {
+                Some(Token::Number(n)) => {
+                    self.advance();
+                    if n < 0 {
+                        return Err(LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::ParserUnexpectedToken,
+                            format!("array size must be non-negative, got {}", n),
+                        ));
+                    }
+                    n as usize
+                }
+                Some(Token::TypedNumber(n, _)) => {
+                    self.advance();
+                    n.try_into().map_err(|_| {
+                        LeoError::new(
+                            ErrorKind::Syntax,
+                            ErrorCode::ParserUnexpectedToken,
+                            format!("array size too large: {}", n),
+                        )
+                    })?
+                }
+                _ => {
+                    return Err(LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::ParserUnexpectedToken,
+                        "expected array size as integer literal".into(),
+                    ))
+                }
+            };
+            self.expect_sym(Symbol::RightBracket)?;
+            return Ok(format!("[{}; {}]", elem, size));
+        }
+        // Simple ident or generic: Name[<T, U>]
+        let name = self.expect_ident()?;
+        if let Some(args) = self.try_parse_type_args() {
+            Ok(format!("{}<{}>", name, args.join(", ")))
+        } else {
+            Ok(name)
         }
     }
 
@@ -139,7 +232,9 @@ impl Parser {
     fn is_expr_start(&self) -> bool {
         self.peek().map_or(false, |t| match &t.token {
             Token::Number(_)
+            | Token::TypedNumber(_, _)
             | Token::Float(_)
+            | Token::TypedFloat(_, _)
             | Token::String(_)
             | Token::Char(_)
             | Token::Identifier(_)
@@ -270,7 +365,7 @@ impl Parser {
         self.advance();
         let name = self.expect_ident()?;
         let ty = if self.match_sym(Symbol::Colon) {
-            Some(self.expect_ident()?)
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
@@ -293,14 +388,21 @@ impl Parser {
         let params = self.parse_params()?;
         self.expect_sym(Symbol::RightParen)?;
         let ret = if self.match_sym(Symbol::Arrow) {
-            Some(self.expect_ident()?)
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
         let body = self.parse_block()?;
         let span = self.merge(start, self.prev_span());
         if is_async {
-            Ok(Stmt::AsyncFunction(name, params, ret, body, type_params, span))
+            Ok(Stmt::AsyncFunction(
+                name,
+                params,
+                ret,
+                body,
+                type_params,
+                span,
+            ))
         } else {
             Ok(Stmt::Function(name, params, ret, body, type_params, span))
         }
@@ -315,7 +417,7 @@ impl Parser {
             }
             let name = self.expect_ident()?;
             self.expect_sym(Symbol::Colon)?;
-            let ty = self.expect_ident()?;
+            let ty = self.parse_type_annotation()?;
             params.push((name, ty));
             if !self.match_sym(Symbol::Comma) {
                 break;
@@ -359,19 +461,10 @@ impl Parser {
             if self.is_sym(Symbol::Greater) {
                 break;
             }
-            // Must be an identifier (type name)
-            match self.peek() {
-                Some(t) => match &t.token {
-                    Token::Identifier(n) => {
-                        args.push(n.clone());
-                        self.advance();
-                    }
-                    _ => {
-                        self.pos = saved;
-                        return None;
-                    }
-                },
-                None => {
+            // Use full type annotation parser so [T; N] and nested generics work
+            match self.parse_type_annotation() {
+                Ok(ty) => args.push(ty),
+                Err(_) => {
                     self.pos = saved;
                     return None;
                 }
@@ -458,7 +551,7 @@ impl Parser {
         self.advance();
         let name = self.expect_ident()?;
         self.expect_sym(Symbol::Colon)?;
-        let ty = self.expect_ident()?;
+        let ty = self.parse_type_annotation()?;
         self.expect_sym(Symbol::Equal)?;
         let expr = self.parse_expr()?;
         self.skip_semi();
@@ -470,8 +563,17 @@ impl Parser {
         ))
     }
 
-    /// Parse if: if expr { stmts } [else { stmts }] or else if chain
+    /// Parse if: if expr { stmts } [else { stmts }] or else if chain — with depth guard
     fn parse_if(&mut self) -> LeoResult<Stmt> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::ParserUnexpectedToken,
+                "expression nested too deeply (max 512 levels)".into(),
+            ));
+        }
         let start = self.cur_span();
         self.advance();
         let cond = self.parse_expr()?;
@@ -496,6 +598,7 @@ impl Parser {
         } else {
             None
         };
+        self.depth -= 1;
         Ok(Stmt::If(branches, els, self.merge(start, self.prev_span())))
     }
 
@@ -563,7 +666,7 @@ impl Parser {
         while !self.is_eof() && !self.is_sym(Symbol::RightBrace) {
             let fname = self.expect_ident()?;
             self.expect_sym(Symbol::Colon)?;
-            let ftype = self.expect_ident()?;
+            let ftype = self.parse_type_annotation()?;
             fields.push((fname, ftype));
             self.match_sym(Symbol::Comma);
         }
@@ -612,9 +715,27 @@ impl Parser {
         self.parse_prec(0)
     }
 
-    /// Recursive precedence climbing
+    /// Recursive precedence climbing with depth guard
     fn parse_prec(&mut self, min: u8) -> LeoResult<Expr> {
-        let mut left = self.parse_unary()?;
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::ParserUnexpectedToken,
+                "expression nested too deeply (max 512 levels)".into(),
+            ));
+        }
+        let mut left = match self.parse_unary() {
+            Ok(e) => {
+                self.depth -= 1;
+                e
+            }
+            Err(e) => {
+                self.depth -= 1;
+                return Err(e);
+            }
+        };
         loop {
             // Lookahead: if left is Ident and next is `<`, try type args
             if let Expr::Ident(_, _) = &left {
@@ -628,12 +749,7 @@ impl Parser {
                                 self.match_sym(Symbol::Comma);
                             }
                             self.expect_sym(Symbol::RightParen)?;
-                            left = Expr::Call(
-                                Box::new(left),
-                                args,
-                                type_args,
-                                Span::dummy(),
-                            );
+                            left = Expr::Call(Box::new(left), args, type_args, Span::dummy());
                             continue;
                         }
                     }
@@ -674,8 +790,17 @@ impl Parser {
         }
     }
 
-    /// Parse unary: -expr, !expr
+    /// Parse unary: -expr, !expr — with depth guard
     fn parse_unary(&mut self) -> LeoResult<Expr> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::ParserUnexpectedToken,
+                "expression nested too deeply (max 512 levels)".into(),
+            ));
+        }
         let op = if self.match_sym(Symbol::Minus) {
             Some(UnOp::Neg)
         } else if self.match_sym(Symbol::Bang) {
@@ -684,10 +809,21 @@ impl Parser {
             None
         };
         if let Some(op) = op {
-            let e = self.parse_unary()?;
+            let e = match self.parse_unary() {
+                Ok(e) => {
+                    self.depth -= 1;
+                    e
+                }
+                Err(e) => {
+                    self.depth -= 1;
+                    return Err(e);
+                }
+            };
             return Ok(Expr::Unary(op, Box::new(e), Span::dummy()));
         }
-        self.parse_postfix()
+        let result = self.parse_postfix();
+        self.depth -= 1;
+        result
     }
 
     /// Parse postfix: call(), .field, [index], type_args<T>
@@ -747,10 +883,22 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Number(n, span))
             }
+            Token::TypedNumber(n, ty) => {
+                let n = *n;
+                let ty = crate::common::types::LeoType::parse(ty)?;
+                self.advance();
+                Ok(Expr::IntLiteral(n, ty, span))
+            }
             Token::Float(f) => {
                 let f = *f;
                 self.advance();
                 Ok(Expr::Float(f, span))
+            }
+            Token::TypedFloat(f, ty) => {
+                let f = *f;
+                let ty = crate::common::types::LeoType::parse(ty)?;
+                self.advance();
+                Ok(Expr::FloatLiteral(f, ty, span))
             }
             Token::String(s) => {
                 let s = s.clone();
@@ -797,7 +945,21 @@ impl Parser {
             }
             Token::Symbol(Symbol::LeftParen) => {
                 self.advance();
+                if self.match_sym(Symbol::RightParen) {
+                    return Ok(Expr::Unit(span));
+                }
                 let e = self.parse_expr()?;
+                if self.match_sym(Symbol::Comma) {
+                    let mut elems = vec![e];
+                    while !self.is_eof() && !self.is_sym(Symbol::RightParen) {
+                        elems.push(self.parse_expr()?);
+                        if !self.match_sym(Symbol::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect_sym(Symbol::RightParen)?;
+                    return Ok(Expr::Tuple(elems, span));
+                }
                 self.expect_sym(Symbol::RightParen)?;
                 Ok(e)
             }
@@ -980,6 +1142,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_typed_literals() {
+        let stmts = parse_src("42u8\n7usize\n3.14f");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Expr(Expr::IntLiteral(42, crate::common::types::LeoType::U8, _))
+        ));
+        assert!(matches!(
+            &stmts[1],
+            Stmt::Expr(Expr::IntLiteral(7, crate::common::types::LeoType::USize, _))
+        ));
+        assert!(matches!(
+            &stmts[2],
+            Stmt::Expr(Expr::FloatLiteral(_, crate::common::types::LeoType::F32, _))
+        ));
+    }
+
+    #[test]
     fn test_parse_let() {
         let stmts = parse_src("let x: i32 = 42");
         assert!(matches!(&stmts[0], Stmt::Let(n, _, _) if n == "x"));
@@ -989,6 +1168,24 @@ mod tests {
     fn test_parse_fn() {
         let stmts = parse_src("fn add(a: i32, b: i32) -> i32 { return a }");
         assert!(matches!(&stmts[0], Stmt::Function(..)));
+    }
+
+    #[test]
+    fn test_parse_fn_type_annotation() {
+        let stmts = parse_src("let f: fn(i64, bool) -> str");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Let(_, Some(ty), _) if ty == "fn(i64, bool) -> str"
+        ));
+    }
+
+    #[test]
+    fn test_parse_tuple_expr_and_type_annotation() {
+        let stmts = parse_src("let t: (i64, bool) = (1, true)");
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Let(_, Some(ty), Some(Expr::Tuple(elems, _))) if ty == "(i64, bool)" && elems.len() == 2
+        ));
     }
 
     #[test]

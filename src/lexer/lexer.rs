@@ -2,8 +2,9 @@ use crate::common::{ErrorCode, ErrorKind, LeoError, LeoResult, Pos, Span};
 use crate::lexer::token::{Keyword, Symbol, Token, TokenWithSpan};
 
 pub struct Lexer {
-    source: String,
-    pos: usize,
+    chars: Vec<char>, // H1: pre-computed for O(1) access
+    pos: usize,       // char index
+    byte_pos: usize,  // LM3: byte offset into source for correct UTF-8 spans
     line: u32,
     column: u32,
     tokens: Vec<TokenWithSpan>,
@@ -12,8 +13,9 @@ pub struct Lexer {
 impl Lexer {
     pub fn new(source: &str) -> Self {
         Self {
-            source: source.to_string(),
+            chars: source.chars().collect(),
             pos: 0,
+            byte_pos: 0,
             line: 1,
             column: 1,
             tokens: Vec::new(),
@@ -101,6 +103,28 @@ impl Lexer {
         let mut buf = String::new();
         let mut is_float = false;
 
+        if self.current_char() == '0' {
+            let next = self.peek_char();
+            if matches!(next, 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
+                buf.push('0');
+                self.advance();
+                let prefix = self.current_char();
+                buf.push(prefix);
+                self.advance();
+                let radix = match prefix {
+                    'x' | 'X' => 16,
+                    'b' | 'B' => 2,
+                    'o' | 'O' => 8,
+                    _ => 10,
+                };
+                while !self.is_eof() && self.current_char().is_digit(radix) {
+                    buf.push(self.current_char());
+                    self.advance();
+                }
+                return self.finish_int_literal(start, &buf, radix);
+            }
+        }
+
         while !self.is_eof() {
             let ch = self.current_char();
             if ch.is_ascii_digit() {
@@ -119,30 +143,161 @@ impl Lexer {
                 break;
             }
         }
+        let suffix = self.scan_number_suffix();
         let end = self.mark_pos();
 
         let token = if is_float {
-            Token::Float(buf.parse().map_err(|_| {
+            let value = buf.parse().map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
                     ErrorCode::LexerInvalidNumber,
                     format!("invalid float literal: {}", buf),
                 )
-            })?)
+            })?;
+            if let Some(suffix) = suffix {
+                self.validate_float_suffix(&suffix)?;
+                Token::TypedFloat(value, self.normalize_float_suffix(&suffix))
+            } else {
+                Token::Float(value)
+            }
         } else {
-            Token::Number(buf.parse().map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::LexerInvalidNumber,
-                    format!("integer literal too large: {}", buf),
-                )
-            })?)
+            if let Some(suffix) = suffix {
+                let value = buf.parse::<u128>().map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::LexerInvalidNumber,
+                        format!("integer literal too large: {}", buf),
+                    )
+                })?;
+                self.validate_int_suffix(&suffix, value)?;
+                Token::TypedNumber(value, suffix)
+            } else {
+                let value = buf.parse().map_err(|_| {
+                    LeoError::new(
+                        ErrorKind::Syntax,
+                        ErrorCode::LexerInvalidNumber,
+                        format!("integer literal too large: {}", buf),
+                    )
+                })?;
+                Token::Number(value)
+            }
         };
 
         Ok(TokenWithSpan {
             token,
             span: Span::new(start, end),
         })
+    }
+
+    fn finish_int_literal(
+        &mut self,
+        start: Pos,
+        buf: &str,
+        radix: u32,
+    ) -> LeoResult<TokenWithSpan> {
+        let suffix = self.scan_number_suffix();
+        let end = self.mark_pos();
+        let digits = &buf[2..];
+        if digits.is_empty() {
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::LexerInvalidNumber,
+                format!("invalid integer literal: {}", buf),
+            ));
+        }
+        let value = u128::from_str_radix(digits, radix).map_err(|_| {
+            LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::LexerInvalidNumber,
+                format!("integer literal too large: {}", buf),
+            )
+        })?;
+        let token = if let Some(suffix) = suffix {
+            self.validate_int_suffix(&suffix, value)?;
+            Token::TypedNumber(value, suffix)
+        } else {
+            if value > i64::MAX as u128 {
+                return Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::LexerInvalidNumber,
+                    format!("integer literal too large: {}", buf),
+                ));
+            }
+            Token::Number(value as i64)
+        };
+        Ok(TokenWithSpan {
+            token,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn scan_number_suffix(&mut self) -> Option<String> {
+        if self.is_eof() || !self.current_char().is_ascii_alphabetic() {
+            return None;
+        }
+        let mut suffix = String::new();
+        while !self.is_eof() {
+            let ch = self.current_char();
+            if ch.is_ascii_alphanumeric() {
+                suffix.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        Some(suffix)
+    }
+
+    fn validate_int_suffix(&self, suffix: &str, value: u128) -> LeoResult<()> {
+        let max = match suffix {
+            "i8" => i8::MAX as u128,
+            "i16" => i16::MAX as u128,
+            "i32" => i32::MAX as u128,
+            "i64" => i64::MAX as u128,
+            "i128" => i128::MAX as u128,
+            "isize" => isize::MAX as u128,
+            "u8" => u8::MAX as u128,
+            "u16" => u16::MAX as u128,
+            "u32" => u32::MAX as u128,
+            "u64" => u64::MAX as u128,
+            "u128" => u128::MAX,
+            "usize" => usize::MAX as u128,
+            _ => {
+                return Err(LeoError::new(
+                    ErrorKind::Syntax,
+                    ErrorCode::LexerInvalidNumber,
+                    format!("invalid integer literal suffix: {}", suffix),
+                ))
+            }
+        };
+        if value > max {
+            return Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::LexerInvalidNumber,
+                format!("integer literal {} overflows {}", value, suffix),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_float_suffix(&self, suffix: &str) -> LeoResult<()> {
+        if matches!(suffix, "f" | "f32" | "f64") {
+            Ok(())
+        } else {
+            Err(LeoError::new(
+                ErrorKind::Syntax,
+                ErrorCode::LexerInvalidNumber,
+                format!("invalid float literal suffix: {}", suffix),
+            ))
+        }
+    }
+
+    fn normalize_float_suffix(&self, suffix: &str) -> String {
+        if suffix == "f" {
+            "f32".into()
+        } else {
+            suffix.into()
+        }
     }
 
     fn scan_string(&mut self) -> LeoResult<TokenWithSpan> {
@@ -528,26 +683,29 @@ impl Lexer {
     }
 
     fn is_eof(&self) -> bool {
-        self.pos >= self.source.len()
+        self.pos >= self.chars.len()
     }
 
     fn current_char(&self) -> char {
-        self.source.chars().nth(self.pos).unwrap_or('\0')
+        self.chars.get(self.pos).copied().unwrap_or('\0')
     }
 
     fn peek_char(&self) -> char {
-        self.source.chars().nth(self.pos + 1).unwrap_or('\0')
+        self.chars.get(self.pos + 1).copied().unwrap_or('\0')
     }
 
     fn advance(&mut self) {
         if !self.is_eof() {
+            // LM3: advance byte_pos by the UTF-8 byte length of current char
+            self.byte_pos += self.chars[self.pos].len_utf8();
             self.pos += 1;
             self.column += 1;
         }
     }
 
     fn mark_pos(&self) -> Pos {
-        Pos::new(self.line, self.column, self.pos as u32)
+        // LM3: store byte offset, not char index
+        Pos::new(self.line, self.column, self.byte_pos as u32)
     }
 }
 
@@ -574,6 +732,34 @@ mod tests {
         let mut lexer = Lexer::new("3.14");
         let tokens = lexer.tokenize().unwrap();
         assert!(matches!(tokens[0].token, Token::Float(_)));
+    }
+
+    #[test]
+    fn test_lexer_typed_number_suffixes() {
+        let mut lexer = Lexer::new("42u8 0xFFu16 18446744073709551615u64 7usize");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(matches!(&tokens[0].token, Token::TypedNumber(42, ty) if ty == "u8"));
+        assert!(matches!(&tokens[1].token, Token::TypedNumber(255, ty) if ty == "u16"));
+        assert!(
+            matches!(&tokens[2].token, Token::TypedNumber(n, ty) if *n == u64::MAX as u128 && ty == "u64")
+        );
+        assert!(matches!(&tokens[3].token, Token::TypedNumber(7, ty) if ty == "usize"));
+    }
+
+    #[test]
+    fn test_lexer_u128_suffix() {
+        let mut lexer = Lexer::new("340282366920938463463374607431768211455u128");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(matches!(&tokens[0].token, Token::TypedNumber(u128::MAX, ty) if ty == "u128"));
+    }
+
+    #[test]
+    fn test_lexer_f32_suffix() {
+        let mut lexer = Lexer::new("3.14f 2.0f32 1.0f64");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(matches!(&tokens[0].token, Token::TypedFloat(_, ty) if ty == "f32"));
+        assert!(matches!(&tokens[1].token, Token::TypedFloat(_, ty) if ty == "f32"));
+        assert!(matches!(&tokens[2].token, Token::TypedFloat(_, ty) if ty == "f64"));
     }
 
     #[test]

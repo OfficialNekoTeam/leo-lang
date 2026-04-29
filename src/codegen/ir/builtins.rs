@@ -44,10 +44,14 @@ impl IrBuilder {
             return Ok(ctx.module().get_context().i64_type().const_int(0, false));
         }
         let tv = self.eval_expr(&args[0], ctx)?;
-        
+
         // Ensure "free" is declared
         let free_fn = ctx.module().get_function("free").unwrap_or_else(|| {
-            let i8_ptr_type = ctx.module().get_context().i8_type().ptr_type(inkwell::AddressSpace::default());
+            let i8_ptr_type = ctx
+                .module()
+                .get_context()
+                .i8_type()
+                .ptr_type(inkwell::AddressSpace::default());
             let void_type = ctx.module().get_context().void_type();
             let fn_type = void_type.fn_type(&[i8_ptr_type.into()], false);
             ctx.module_mut().add_function("free", fn_type, None)
@@ -56,8 +60,20 @@ impl IrBuilder {
         let ptr = if tv.value.is_pointer_value() {
             tv.value.into_pointer_value()
         } else if tv.value.is_int_value() {
-            let i8_ptr_type = ctx.module().get_context().i8_type().ptr_type(inkwell::AddressSpace::default());
-            ctx.builder().build_int_to_ptr(tv.value.into_int_value(), i8_ptr_type, "free.i2p").map_err(|_| crate::common::error::LeoError::new(crate::common::error::ErrorKind::Syntax, crate::common::error::ErrorCode::CodegenLLVMError, "int_to_ptr for free failed".into()))?
+            let i8_ptr_type = ctx
+                .module()
+                .get_context()
+                .i8_type()
+                .ptr_type(inkwell::AddressSpace::default());
+            ctx.builder()
+                .build_int_to_ptr(tv.value.into_int_value(), i8_ptr_type, "free.i2p")
+                .map_err(|_| {
+                    crate::common::error::LeoError::new(
+                        crate::common::error::ErrorKind::Syntax,
+                        crate::common::error::ErrorCode::CodegenLLVMError,
+                        "int_to_ptr for free failed".into(),
+                    )
+                })?
         } else {
             return Err(crate::common::error::LeoError::new(
                 crate::common::error::ErrorKind::Syntax,
@@ -66,7 +82,15 @@ impl IrBuilder {
             ));
         };
 
-        ctx.builder().build_call(free_fn, &[ptr.into()], "call_free").map_err(|_| crate::common::error::LeoError::new(crate::common::error::ErrorKind::Syntax, crate::common::error::ErrorCode::CodegenLLVMError, "call free failed".into()))?;
+        ctx.builder()
+            .build_call(free_fn, &[ptr.into()], "call_free")
+            .map_err(|_| {
+                crate::common::error::LeoError::new(
+                    crate::common::error::ErrorKind::Syntax,
+                    crate::common::error::ErrorCode::CodegenLLVMError,
+                    "call free failed".into(),
+                )
+            })?;
         Ok(ctx.module().get_context().i64_type().const_int(0, false))
     }
 }

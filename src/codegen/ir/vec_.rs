@@ -9,44 +9,8 @@ impl IrBuilder {
         let context = ctx.module().get_context();
         let i64_type = context.i64_type();
         let i64_ptr_type = i64_type.ptr_type(AddressSpace::default());
-        let malloc_fn = ctx.module().get_function("malloc").ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc not declared".into(),
-            )
-        })?;
         let header_size = i64_type.const_int(24, false);
-        let header_alloc = ctx
-            .builder()
-            .build_call(malloc_fn, &[header_size.into()], "vec_hdr_malloc")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc vec header failed".into(),
-                )
-            })?;
-        let header_raw = header_alloc.try_as_basic_value().left().ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "malloc void".into(),
-            )
-        })?;
-        // NULL check: abort if header malloc failed
-        let header_ptr = header_raw.into_pointer_value();
-        let header_i64 = ctx
-            .builder()
-            .build_ptr_to_int(header_ptr, i64_type, "vec_hdr_i64")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr_to_int failed".into(),
-                )
-            })?;
-        self.emit_null_check(header_i64, "runtime error: out of memory\n", ctx)?;
+        let header_ptr = self.emit_checked_malloc(header_size, "vec_hdr_malloc", ctx)?;
         let header = ctx
             .builder()
             .build_pointer_cast(header_ptr, i64_ptr_type, "vec_hdr")
@@ -93,25 +57,7 @@ impl IrBuilder {
                 )
             })?;
         // data = malloc(32)
-        let dm = ctx
-            .builder()
-            .build_call(malloc_fn, &[i64_type.const_int(32, false).into()], "vec_dm")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "malloc data".into(),
-                )
-            })?;
-        let dr = dm.try_as_basic_value().left().ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "void".into(),
-            )
-        })?;
-        // NULL check: abort if data malloc failed
-        let dr_ptr = dr.into_pointer_value();
+        let dr_ptr = self.emit_checked_malloc(i64_type.const_int(32, false), "vec_dm", ctx)?;
         let di = ctx
             .builder()
             .build_ptr_to_int(dr_ptr, i64_type, "di")
@@ -122,7 +68,6 @@ impl IrBuilder {
                     "ptr_to_int".into(),
                 )
             })?;
-        self.emit_null_check(di, "runtime error: out of memory\n", ctx)?;
         let dp = unsafe {
             ctx.builder()
                 .build_in_bounds_gep(header, &[two], "vdp")
@@ -309,46 +254,7 @@ impl IrBuilder {
             .map_err(|_| {
                 LeoError::new(ErrorKind::Syntax, ErrorCode::CodegenLLVMError, "mul".into())
             })?;
-        let realloc_fn = ctx.module().get_function("realloc").ok_or_else(|| {
-            LeoError::new(
-                ErrorKind::Syntax,
-                ErrorCode::CodegenLLVMError,
-                "no realloc".into(),
-            )
-        })?;
-        let nd = ctx
-            .builder()
-            .build_call(realloc_fn, &[old_dp.into(), asz.into()], "rea")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "realloc".into(),
-                )
-            })?;
-        let nd_raw = nd
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "void".into(),
-                )
-            })?
-            .into_pointer_value();
-        // NULL check: abort if realloc failed
-        let nd_i64 = ctx
-            .builder()
-            .build_ptr_to_int(nd_raw, i64_type, "nd_i64")
-            .map_err(|_| {
-                LeoError::new(
-                    ErrorKind::Syntax,
-                    ErrorCode::CodegenLLVMError,
-                    "ptr_to_int failed".into(),
-                )
-            })?;
-        self.emit_null_check(nd_i64, "runtime error: out of memory\n", ctx)?;
+        let nd_raw = self.emit_checked_realloc(old_dp, asz, "rea", ctx)?;
         let ndp = ctx
             .builder()
             .build_pointer_cast(nd_raw, i64_ptr_type, "ndp")

@@ -75,6 +75,15 @@ impl IrBuilder {
                 gv.set_constant(true);
                 gv.set_linkage(inkwell::module::Linkage::Private);
             }
+            Expr::IntLiteral(n, lit_ty, _) => {
+                let gv =
+                    ctx.module_mut()
+                        .add_global(llvm_type, Some(AddressSpace::default()), name);
+                let int_ty = Self::leo_type_to_llvm(lit_ty, ctx).into_int_type();
+                gv.set_initializer(&Self::const_int_value(int_ty, *n));
+                gv.set_constant(true);
+                gv.set_linkage(inkwell::module::Linkage::Private);
+            }
             Expr::Bool(b, _) => {
                 let gv =
                     ctx.module_mut()
@@ -103,8 +112,27 @@ impl IrBuilder {
         init: &Option<Expr>,
         ctx: &mut LlvmContext,
     ) -> LeoResult<()> {
-        let type_str = ty.as_deref().unwrap_or("i64");
-        let llvm_type = Self::llvm_type(type_str, ctx);
+        let declared_type = ty.as_deref().map(LeoType::from_str);
+        let alloc_type = if let Some(ty) = &declared_type {
+            ty.clone()
+        } else if let Some(expr) = init {
+            self.infer_expr_type(expr, ctx)
+        } else {
+            LeoType::I64
+        };
+        let storage_type = if matches!(
+            alloc_type,
+            LeoType::Array(_, _)
+                | LeoType::Struct(_)
+                | LeoType::Enum(_)
+                | LeoType::Generic(_, _)
+                | LeoType::Tuple(_)
+        ) {
+            LeoType::I64
+        } else {
+            alloc_type.clone()
+        };
+        let llvm_type = Self::leo_type_to_llvm(&storage_type, ctx);
         let ptr = ctx.builder().build_alloca(llvm_type, name).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
@@ -120,11 +148,15 @@ impl IrBuilder {
                     self.array_sizes
                         .insert(name.to_string(), elems.len() as u32);
                 }
-                Expr::ArrayRepeat(_, count, _) => {
-                    if let Expr::Number(n, _) = count.as_ref() {
+                Expr::ArrayRepeat(_, count, _) => match count.as_ref() {
+                    Expr::Number(n, _) => {
                         self.array_sizes.insert(name.to_string(), *n as u32);
                     }
-                }
+                    Expr::IntLiteral(n, _, _) => {
+                        self.array_sizes.insert(name.to_string(), *n as u32);
+                    }
+                    _ => {}
+                },
                 Expr::String(s, _) => {
                     self.array_sizes.insert(name.to_string(), s.len() as u32);
                 }
@@ -133,10 +165,13 @@ impl IrBuilder {
                 }
                 _ => {}
             }
-            let inferred_type = self.infer_type_with_ctx(expr, type_str, ctx);
-            ctx.register_type(name.to_string(), inferred_type);
+            let inferred_type = declared_type
+                .clone()
+                .unwrap_or_else(|| self.infer_expr_type(expr, ctx));
+            ctx.register_type(name.to_string(), inferred_type.clone());
             let tv = self.eval_expr(expr, ctx)?;
-            ctx.builder().build_store(ptr, tv.value).map_err(|_| {
+            let value = self.coerce_arg_to_type(tv, &storage_type, ctx)?;
+            ctx.builder().build_store(ptr, value).map_err(|_| {
                 LeoError::new(
                     ErrorKind::Syntax,
                     ErrorCode::CodegenLLVMError,
@@ -144,8 +179,7 @@ impl IrBuilder {
                 )
             })?;
         } else {
-            let leo_type = LeoType::from_str(type_str);
-            ctx.register_type(name.to_string(), leo_type);
+            ctx.register_type(name.to_string(), alloc_type);
         }
         Ok(())
     }
@@ -164,7 +198,7 @@ impl IrBuilder {
             )
         })?;
         let tv = self.eval_expr(expr, ctx)?;
-            ctx.builder().build_store(ptr, tv.value).map_err(|_| {
+        ctx.builder().build_store(ptr, tv.value).map_err(|_| {
             LeoError::new(
                 ErrorKind::Syntax,
                 ErrorCode::CodegenLLVMError,
@@ -702,43 +736,9 @@ impl IrBuilder {
     }
 
     fn infer_type_with_ctx(&self, expr: &Expr, type_str: &str, ctx: &LlvmContext) -> LeoType {
-        let declared = LeoType::from_str(type_str);
         if type_str != "i64" {
-            return declared;
+            return LeoType::from_str(type_str);
         }
-        match expr {
-            Expr::String(_, _) => LeoType::Str,
-            Expr::Number(_, _) => LeoType::I64,
-            Expr::Bool(_, _) => LeoType::Bool,
-            Expr::Char(_, _) => LeoType::Char,
-            Expr::Float(_, _) => LeoType::F64,
-            Expr::Call(callee, _, _, _) => {
-                if let Expr::Ident(fn_name, _) = callee.as_ref() {
-                    match fn_name.as_str() {
-                        "char_to_str" | "to_string" | "str_concat" | "str_slice" | "file_read" => {
-                            LeoType::Str
-                        }
-                        "is_digit" | "is_alpha" | "is_alnum" => LeoType::Bool,
-                        _ => ctx
-                            .get_fn_return_type(fn_name)
-                            .cloned()
-                            .unwrap_or(LeoType::I64),
-                    }
-                } else {
-                    LeoType::I64
-                }
-            }
-            Expr::Binary(BinOp::Add, left, right, _) => {
-                if self.expr_is_string(left, ctx) || self.expr_is_string(right, ctx) {
-                    LeoType::Str
-                } else {
-                    LeoType::I64
-                }
-            }
-            Expr::StructInit(_, _, _, _) => LeoType::Ptr,
-            Expr::Array(_, _) | Expr::ArrayRepeat(_, _, _) => LeoType::Ptr,
-            Expr::Ident(name, _) => ctx.get_type(name).cloned().unwrap_or(LeoType::I64),
-            _ => LeoType::I64,
-        }
+        self.infer_expr_type(expr, ctx)
     }
 }
